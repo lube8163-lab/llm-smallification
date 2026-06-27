@@ -24,6 +24,17 @@ struct ContentView: View {
                             Text(selection.title).tag(selection)
                         }
                     }
+                    if viewModel.runMode.usesInputIDs {
+                        TextField("Input IDs", text: $viewModel.inputIDsText)
+                            .keyboardType(.numbersAndPunctuation)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    if viewModel.runMode.usesGeneratedTokenCount {
+                        Stepper(value: $viewModel.generatedTokenCount, in: 1...ProbeRunner.maxGeneratedTokenCount) {
+                            LabeledContent("Tokens", value: "\(viewModel.generatedTokenCount)")
+                        }
+                    }
                     Button {
                         viewModel.run()
                     } label: {
@@ -82,6 +93,8 @@ final class ProbeViewModel: ObservableObject {
     @Published var runMode = ProbeRunMode.selectedFromProcess(default: .loadEmbedding)
     @Published var computeSelection = ProbeComputeSelection.selectedFromProcess(default: .cpuOnly)
     @Published var layerSelection = ProbeLayerSelection.selectedFromProcess(default: .first8)
+    @Published var inputIDsText = ProbeRunner.selectedInputIDsTextFromProcess()
+    @Published var generatedTokenCount = ProbeRunner.selectedGeneratedTokenCountFromProcess()
     @Published var isRunning = false
     @Published var steps: [ProbeStep] = []
     @Published var summary = "Idle"
@@ -110,12 +123,16 @@ final class ProbeViewModel: ObservableObject {
         let computeSelection = computeSelection
         let runMode = runMode
         let layerSelection = layerSelection
+        let inputIDsText = inputIDsText
+        let generatedTokenCount = generatedTokenCount
         Task {
             let result = await Task.detached(priority: .userInitiated) {
                 ProbeRunner.run(
                     computeSelection: computeSelection,
                     mode: runMode,
-                    layerSelection: layerSelection
+                    layerSelection: layerSelection,
+                    inputIDsText: inputIDsText,
+                    generatedTokenCount: generatedTokenCount
                 )
             }.value
 

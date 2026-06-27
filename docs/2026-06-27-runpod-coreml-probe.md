@@ -351,11 +351,15 @@ rather than decoder matmul time.
 ## Next step
 
 Move from the validated fixed-ID one-token probe toward a minimally usable text
-loop:
+loop. The first code step is `generate-token-loop`, which keeps a 4-token window,
+generates a short sequence by argmax, and reuses the embedding and LM head
+models across generated tokens while continuing to load/release decoder layers.
 
-1. Add a tiny tokenizer/prompt-format layer or a host-side helper that feeds
+1. Test `generate-token-loop` with `Tokens = 2` and `Layers = First 48`.
+2. Compare the loop timing against the one-token result to quantify how much
+   endpoint model reuse saves.
+3. Add a tiny tokenizer/prompt-format layer or a host-side helper that feeds
    known-good token IDs.
-2. Implement a repeated one-token loop for a very short fixed window.
-3. Decide whether to keep packages hot for multiple tokens, use grouped layer
+4. Decide whether to keep packages hot for multiple tokens, use grouped layer
    residency, or continue strict load/predict/release for memory headroom.
-4. Re-test CPU-only first, then evaluate accelerator scheduling separately.
+5. Re-test CPU-only first, then evaluate accelerator scheduling separately.

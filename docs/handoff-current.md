@@ -51,8 +51,14 @@ Use this when continuing in a fresh Codex chat.
 
 - `generate-one-token` is implemented and has passed on iPhone CPU-only with
   `Layers = First 48`.
+- `generate-token-loop` is implemented as the next probe. It keeps a fixed
+  4-token window, appends each argmax token, and slides the window. It reuses
+  embedding and LM head models across generated tokens, while decoder layers
+  still use load/predict/release for memory headroom.
 - Keep the fixed 4-token shape.
 - Accept prompt IDs via `COREML_PROBE_INPUT_IDS` or `--input-ids=`.
+- Accept generated token count via `COREML_PROBE_GENERATE_TOKENS` or
+  `--tokens=`. The app clamps the UI to `1...4`.
 - Run embedding -> selected decoder layers -> last-token LM head -> argmax.
 - Log `Prompt IDs` and `Next token`.
 - A simple app icon exists in `Assets.xcassets/AppIcon.appiconset`.
@@ -61,12 +67,15 @@ Use this when continuing in a fresh Codex chat.
 
 Move toward a minimally usable text loop:
 
-1. Add tokenizer/prompt formatting or a host-side helper that feeds known token
+1. Test `Mode = Generate token loop`, `Layers = First 48`, `Tokens = 2`,
+   `Compute = CPU` on device.
+2. Compare timing against the one-token result to see how much endpoint reuse
+   helps.
+3. Add tokenizer/prompt formatting or a host-side helper that feeds known token
    IDs.
-2. Implement a repeated one-token loop for a very short fixed window.
-3. Decide whether to keep model packages hot, group layer residency, or keep the
+4. Decide whether to keep model packages hot, group layer residency, or keep the
    strict load/predict/release path for memory headroom.
-4. Re-test CPU-only first before accelerator experiments.
+5. Re-test CPU-only first before accelerator experiments.
 
 ## Useful commands
 

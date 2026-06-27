@@ -34,9 +34,36 @@ for the detailed run log and measurements.
 - `docs/`: experiment plans and measured results.
 - `scripts/`: local and RunPod helper scripts.
 - `patches/`: patch files for external probes such as `llama.cpp` SwiftUI.
+- `ios/CoreMLProbe/`: an iOS SwiftUI harness for measuring Core ML load,
+  prediction, release, and memory behavior.
 
 Ignored local/output directories include `models/`, `logs/`, `external/`, and
 `runpod-artifacts/`.
+
+## iOS Core ML Probe
+
+After copying selected compiled Core ML bundles from RunPod into
+`runpod-artifacts/compiled`, stage the app-local model assets:
+
+```bash
+./scripts/prepare_ios_coreml_probe_assets.sh
+```
+
+Then build the probe app for a simulator:
+
+```bash
+./scripts/build_coreml_probe_ios.sh
+```
+
+The simulator app can auto-run the probe and print `[CoreMLProbe]` lines:
+
+```bash
+xcrun simctl launch --console booted lab.lube8163.CoreMLProbe --autorun
+```
+
+For an actual iPhone, open `ios/CoreMLProbe/CoreMLProbe.xcodeproj` in Xcode,
+select a signing team, choose the device, and run the `CoreMLProbe` scheme.
+The copied `.mlmodelc` bundles remain ignored by git.
 
 ## License
 

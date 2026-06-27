@@ -332,23 +332,23 @@ decoder depth.
   packaging feasibility, not a full autoregressive runtime.
 - Linux can save MLPackages, but cannot execute or fully validate Apple runtime
   behavior.
-- Only the first 32 decoder packages were copied to the Mac and compiled. The
-  full 48-layer set remains on RunPod.
+- The full 48-layer text stack has been copied to the Mac, compiled, bundled,
+  and run on iPhone. RunPod is no longer needed for this fixed-shape probe.
 - Compressed package size is not the same as peak resident memory on iPhone.
   The iPhone test must measure load/predict/release behavior on device.
-- No image/audio path was converted yet. This was text-only.
+- The app still uses fixed-shape input IDs. There is no on-device tokenizer,
+  real prompt formatting, autoregressive token loop, KV cache, or accelerator
+  scheduling yet.
+- No image/audio path was converted yet. This remains text-only.
 
 ## Next step
 
-Run the cache-cleaning build with `Layers = First 32`. Start with:
+Add a tokenizer-ready one-token generation probe on top of the validated
+sequential runner:
 
-1. `full-stack-sequential`
-
-If that passes, repeat with:
-
-1. `load-decoder-stack`
-2. `decoder-stack`
-3. `full-stack-sequential`
-
-If it fails, capture the first `No space left on device`, `Clear Core ML cache`,
-or memory-pressure point.
+1. Accept a fixed 4-token prompt ID window from `COREML_PROBE_INPUT_IDS` or
+   `--input-ids=`.
+2. Run embedding, all 48 decoder layers, last-token LM head, and argmax.
+3. Log `Next token` separately from `Top logits`.
+4. Once this is stable, add a tiny tokenizer/prompt-format layer and then move
+   toward a repeated one-token loop with an explicit cache strategy.

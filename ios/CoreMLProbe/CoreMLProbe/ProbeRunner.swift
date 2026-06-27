@@ -49,6 +49,7 @@ enum ProbeRunMode: String, CaseIterable, Identifiable {
     case lmHeadOnly = "lm-head-only"
     case fullSequential = "full-sequential"
     case fullStackSequential = "full-stack-sequential"
+    case generateOneToken = "generate-one-token"
 
     var id: String { rawValue }
 
@@ -65,6 +66,7 @@ enum ProbeRunMode: String, CaseIterable, Identifiable {
         case .lmHeadOnly: "LM head synthetic"
         case .fullSequential: "Full sequential"
         case .fullStackSequential: "Full stack sequential"
+        case .generateOneToken: "Generate one token"
         }
     }
 
@@ -238,6 +240,7 @@ enum ProbeRunner {
     private static let decoderPrefix = "gemma4_12b_layer"
     private static let decoderSuffix = "_decoder_seq4_mask_int4_block32"
     private static let lmHeadName = "gemma4_12b_lm_head_1tok_int4_block32"
+    private static let defaultInputIDs: [Int32] = [2, 123, 4567, 106]
 
     static func run(
         computeSelection: ProbeComputeSelection,
@@ -329,6 +332,13 @@ enum ProbeRunner {
                 let top = topLogitSummary(logits)
                 recordStep("Top logits", detail: top, steps: &steps)
                 summary = "OK: \(top)"
+            case .generateOneToken:
+                let token = try runGenerateOneToken(
+                    config: config,
+                    layerSelection: layerSelection,
+                    steps: &steps
+                )
+                summary = "OK: next token #\(token.index) \(String(format: "%.3f", token.logit))"
             }
 
             print("[CoreMLProbe] run finished \(summary)")
@@ -360,9 +370,12 @@ enum ProbeRunner {
     }
 
     private static func runEmbedding(config: MLModelConfiguration, steps: inout [ProbeStep]) throws -> MLMultiArray {
+        let inputIDs = try selectedInputIDs()
+        recordStep("Prompt IDs", detail: inputIDs.map(String.init).joined(separator: ","), steps: &steps)
+
         let hidden = try autoreleasepool {
             let embedding = try loadModel(named: embeddingName, config: config, steps: &steps)
-            let inputIDs = try makeInputIDs()
+            let inputIDs = try makeInputIDs(values: inputIDs)
             let output = try timedPrediction(
                 name: "Embedding",
                 model: embedding,
@@ -376,6 +389,29 @@ enum ProbeRunner {
         recordStep("Released \(embeddingName)", detail: "hidden retained", steps: &steps)
         clearCoreMLRuntimeCache(reason: "released \(embeddingName)", steps: &steps)
         return hidden
+    }
+
+    private static func runGenerateOneToken(
+        config: MLModelConfiguration,
+        layerSelection: ProbeLayerSelection,
+        steps: inout [ProbeStep]
+    ) throws -> (index: Int, logit: Float) {
+        let hidden = try runEmbedding(config: config, steps: &steps)
+        let decoded = try runDecoderStack(
+            hidden: hidden,
+            config: config,
+            layerSelection: layerSelection,
+            steps: &steps
+        )
+        let lastHidden = try copyLastToken(from: decoded)
+        let logits = try runLMHead(hidden: lastHidden, config: config, steps: &steps)
+        let token = try topLogit(logits)
+        recordStep(
+            "Next token",
+            detail: "#\(token.index) logit=\(String(format: "%.3f", token.logit))",
+            steps: &steps
+        )
+        return token
     }
 
     private static func runDecoderStack(
@@ -612,13 +648,41 @@ enum ProbeRunner {
         return array
     }
 
-    private static func makeInputIDs() throws -> MLMultiArray {
+    private static func selectedInputIDs() throws -> [Int32] {
+        let environment = ProcessInfo.processInfo.environment
+        let prefix = "--input-ids="
+        let rawValue = environment["COREML_PROBE_INPUT_IDS"]
+            ?? ProcessInfo.processInfo.arguments
+                .first(where: { $0.hasPrefix(prefix) })
+                .map { String($0.dropFirst(prefix.count)) }
+
+        guard let rawValue else {
+            return defaultInputIDs
+        }
+
+        let values = rawValue.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard values.count == 4 else {
+            throw ProbeError.invalidInputIDs("expected exactly 4 comma-separated token IDs, got \(values.count)")
+        }
+
+        return try values.map { value in
+            guard let parsed = Int32(value) else {
+                throw ProbeError.invalidInputIDs("not an Int32 token ID: \(value)")
+            }
+            return parsed
+        }
+    }
+
+    private static func makeInputIDs(values: [Int32]) throws -> MLMultiArray {
+        guard values.count == 4 else {
+            throw ProbeError.invalidInputIDs("expected 4 token IDs, got \(values.count)")
+        }
+
         let array = try MLMultiArray(shape: [1, 4], dataType: .int32)
         let pointer = array.dataPointer.bindMemory(to: Int32.self, capacity: array.count)
-        pointer[0] = 2
-        pointer[1] = 123
-        pointer[2] = 4567
-        pointer[3] = 106
+        for index in 0..<values.count {
+            pointer[index] = values[index]
+        }
         return array
     }
 
@@ -661,8 +725,16 @@ enum ProbeRunner {
     }
 
     private static func topLogitSummary(_ logits: MLMultiArray) -> String {
+        guard let token = try? topLogit(logits) else {
+            return "dtype \(logits.dataType.rawValue) shape \(logits.shape)"
+        }
+
+        return "#\(token.index) \(String(format: "%.3f", token.logit))"
+    }
+
+    private static func topLogit(_ logits: MLMultiArray) throws -> (index: Int, logit: Float) {
         guard logits.dataType == .float16 else {
-            return "dtype \(logits.dataType.rawValue)"
+            throw ProbeError.unexpectedShape("logits dtype \(logits.dataType.rawValue), shape \(logits.shape)")
         }
 
         let pointer = logits.dataPointer.bindMemory(to: Float16.self, capacity: logits.count)
@@ -675,13 +747,14 @@ enum ProbeRunner {
                 bestIndex = index
             }
         }
-        return "#\(bestIndex) \(String(format: "%.3f", bestValue))"
+        return (bestIndex, bestValue)
     }
 }
 
 enum ProbeError: LocalizedError {
     case missingModel(String)
     case missingOutput(String)
+    case invalidInputIDs(String)
     case unexpectedShape(String)
 
     var errorDescription: String? {
@@ -690,6 +763,8 @@ enum ProbeError: LocalizedError {
             "Missing model: Models/\(name).mlmodelc"
         case .missingOutput(let name):
             "Missing output: \(name)"
+        case .invalidInputIDs(let detail):
+            "Invalid input IDs: \(detail)"
         case .unexpectedShape(let detail):
             "Unexpected shape: \(detail)"
         }

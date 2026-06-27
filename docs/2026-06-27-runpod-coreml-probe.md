@@ -321,6 +321,7 @@ device with CPU-only sequential load/predict/release.
 | `generate-one-token` | prompt IDs `2,123,4567,106`, 48 layers, last-token lm head, argmax completed | 252.1 MB | next token `#253027 1.747`; timed steps about 66.2 sec |
 | `generate-token-loop` | 2 argmax tokens with sliding fixed 4-token window | 260.0 MB | tokens `#253027,#253027`; timed steps about 150.8 sec |
 | `generate-token-loop`, `run-end-only` | 4 argmax tokens with sliding fixed 4-token window | 253.0 MB | tokens `#253027,#253027,#253027,#253027`; timed steps about 243.1 sec |
+| `generate-token-loop`, `run-end-only` | 8 argmax tokens with sliding fixed 4-token window | 226.2 MB | all tokens `#253027`; timed steps about 459.1 sec |
 
 This is the first end-to-end fixed-shape `seq=4` CPU-only proof that all 48
 int4 decoder packages can be streamed on the target iPhone without memory
@@ -352,6 +353,28 @@ the 4-token run, token 1 still carried the initial cache/build cost
 time after token 1 fell to roughly `0.5-0.8 sec` per full 48-layer pass; the
 steady-state cost moved to decoder prediction, about `49-50 sec/token`.
 
+The 8-token `run-end-only` run confirmed the same steady state. Timed steps
+totaled about `459.1 sec`, with a peak footprint of `226.2 MB`. Token 1 took
+`67.5 sec`; tokens 2-8 averaged about `54.7 sec/token` and stayed near
+`39-43 MB` peak. Decoder package load after token 1 remained under about
+`0.9 sec` per full 48-layer pass, while decoder prediction dominated at about
+`49-54 sec/token`.
+
+## Multimodal 12B notes
+
+Official Gemma 4 material describes the 12B Unified model as supporting text,
+image, and audio input with text output. The local Hugging Face config for the
+selected checkpoint reports `architectures = ["Gemma4UnifiedForConditionalGeneration"]`
+and `model_type = gemma4_unified`, with `image_token_id = 258880` and
+`audio_token_id = 258881`. It also includes `vision_config` and `audio_config`;
+the vision path has `patch_size = 16` and `mm_embed_dim = 3840`, while the audio
+path has `audio_embed_dim = 640`.
+
+The current Core ML bundle is text-only: token embedding, 48 decoder layer
+packages, and LM head. A chat UI can expose attachment slots early, but actual
+image/audio inference requires converting the modality embedding/projection
+path and feeding those embeddings into the same 3840-wide decoder stack.
+
 ## Current limitations
 
 - This is a fixed seq=4, cache-free layer conversion. It proves operator and
@@ -369,12 +392,11 @@ steady-state cost moved to decoder prediction, about `49-50 sec/token`.
 
 ## Next step
 
-Use `run-end-only` as the preferred generation cache policy, then measure a
-longer token loop before adding a fuller chat UI.
+Use `run-end-only` as the preferred generation cache policy and move toward a
+text chat surface.
 
-1. Re-test `generate-token-loop` with `Tokens = 8`, `Layers = First 48`, and
-   `Cache = Run end`.
-2. Record whether tokens 2-8 keep the steady-state memory behavior observed in
-   the 4-token run.
-3. Add tokenizer/prompt formatting or a host-side helper that feeds known-good
-   token IDs after the longer loop is stable.
+1. Add tokenizer/prompt formatting or a host-side helper that feeds known-good
+   token IDs.
+2. Wrap the current fixed-window generator in a simple text chat UI.
+3. Keep image/audio as future attachment slots until modality projection
+   conversion is proven.

@@ -45,6 +45,10 @@ Use this when continuing in a fresh Codex chat.
   - `generate-token-loop`, `Cache = Run end`, `Tokens = 4`: peak `253.0 MB`,
     tokens `#253027,#253027,#253027,#253027`, timed steps about `243.1 sec`.
     Token 1 peaked at `253.0 MB`; tokens 2-4 peaked around `40.2 MB`.
+  - `generate-token-loop`, `Cache = Run end`, `Tokens = 8`: peak `226.2 MB`,
+    tokens all `#253027`, timed steps about `459.1 sec`. Token 1 took
+    `67.5 sec`; tokens 2-8 averaged `54.7 sec/token` and stayed near
+    `39-43 MB` peak.
 - In `generate-one-token`, most time is model load/release overhead:
   about `63.7 sec` of timed steps were package loads, while all 48 decoder
   predictions totaled about `1.4 sec`.
@@ -77,15 +81,31 @@ Use this when continuing in a fresh Codex chat.
 ## Recommended next step
 
 The best current cache policy for generation is `Run end`: it keeps Core ML's
-runtime cache warm during a response, then clears it after the run. The next
-device probe should measure longer generation:
+runtime cache warm during a response, then clears it after the run. The 8-token
+probe is stable enough to move to text chat plumbing.
 
-1. Test `Mode = Generate token loop`, `Layers = First 48`, `Tokens = 8`,
-   `Compute = CPU`, `Cache = Run end` on device.
-2. Check whether tokens 2-8 stay near the observed steady-state footprint of
-   about `40 MB`.
-3. If stable, move to tokenizer/prompt formatting or a host-side helper that
-   feeds known token IDs.
+1. Add tokenizer/prompt formatting or a host-side helper that feeds known-good
+   token IDs.
+2. Build a chat UI around the existing fixed-window generator while keeping
+   `Run end` as the generation cache policy.
+3. Keep image/audio as a planned attachment surface in the UI, but do not wire
+   it to inference until modality embedding/projection packages are converted.
+
+## Multimodal notes
+
+- The selected Gemma 4 12B checkpoint is `Gemma4UnifiedForConditionalGeneration`
+  with `model_type = gemma4_unified`.
+- The Hugging Face config exposes `image_token_id = 258880`,
+  `audio_token_id = 258881`, `boi_token_id = 255999`,
+  `boa_token_id = 256000`, `eoi_token_id = 258882`, and
+  `eoa_token_index = 258883`.
+- `vision_config` has `model_type = gemma4_unified_vision`,
+  `patch_size = 16`, and `mm_embed_dim = 3840`; `audio_config` has
+  `model_type = gemma4_unified_audio` and `audio_embed_dim = 640`.
+- Treat text chat as phase 1. Image/audio support requires converting the
+  modality input projection path into Core ML and feeding those embeddings into
+  the same 3840-wide decoder stack. The current app only bundles text
+  embedding, decoder layers, and LM head.
 
 ## Useful commands
 

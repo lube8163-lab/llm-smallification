@@ -149,6 +149,22 @@ retention and/or accelerator/debugger runtime overhead rather than by the
 single-layer CPU path itself. The next useful probe is multiple decoder layer
 packages discovered and executed one at a time.
 
+## iPhone CPU-only 8-layer stack smoke
+
+After copying and compiling decoder layers 0-7 locally, the iPhone CPU-only
+stack probes completed with the sequential loader.
+
+| Mode | Result | Peak footprint in log | Notable timing |
+| --- | --- | ---: | ---: |
+| `load-decoder-stack` | loaded 8 decoder layers | 187.0 MB | initial layer loads ranged 0.78-5.09 sec |
+| `decoder-stack` | decoded `[1,4,3840]` | 29.1 MB | 8 decoder predictions took about 7.0 sec total |
+| `full-stack-sequential` | embedding, 8 layers, lm head completed | 34.8 MB | decoder predictions took about 7.6 sec total; lm head 0.2567 sec |
+
+There was no obvious monotonic memory growth across the 8 decoder layers. The
+full-stack output top logit was `#121220 6.859`. This is still a fixed-shape
+seq=4, cache-free probe, but the sequential Core ML packaging approach looks
+healthy enough to scale the layer count in steps.
+
 ## Current limitations
 
 - This is a fixed seq=4, cache-free layer conversion. It proves operator and

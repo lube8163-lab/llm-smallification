@@ -258,6 +258,55 @@ execution.
 24-layer failure was therefore most likely stale or accumulated Core ML runtime
 cache pressure rather than a direct 24-layer memory ceiling.
 
+## iPhone CPU-only 32-layer cache-cleaning smoke
+
+Device log supplied from iPhone18,3 on iOS 26.4.2. With the cache-cleaning build
+and a clean reinstall, the first 32 decoder layers completed the same CPU-only
+sequential probes.
+
+| Mode | Result | Peak footprint in log | Notable timing / output |
+| --- | --- | ---: | --- |
+| `full-stack-sequential` | embedding, 32 layers, lm head completed | 251.7 MB | top logit `#258882 46.938`; lm head predict 0.2224 sec |
+| `load-decoder-stack` | loaded 32 decoder layers | 251.6 MB | largest observed load footprint around layer 30 |
+| `decoder-stack` | decoded `[1,4,3840]` | 190.8 MB | completed all 32 decoder predictions |
+
+The sharp 24-layer failure did not reproduce after cache clearing and reinstall.
+The 32-layer result keeps the sequential package strategy viable for the full
+48-layer fixed-shape probe.
+
+## 48-layer staging for next iPhone smoke
+
+The preserved RunPod volume was reattached to an RTX A6000 pod, and decoder
+layers 32-47 were copied from
+`/workspace/gemma12b/coreml-layers-seq4-int4` to the Mac. All 48 decoder layer
+packages are now present locally, compiled, and copied into the iOS probe app
+with the embedding and LM head bundles.
+
+| Artifact | Size / count |
+| --- | ---: |
+| `runpod-artifacts/coreml-probes` | about `6.8G` |
+| `runpod-artifacts/compiled` | about `6.8G` |
+| `ios/CoreMLProbe/CoreMLProbe/Models` | about `6.8G` |
+| `Debug-iphonesimulator/CoreMLProbe.app` | about `6.8G` |
+| `Debug-iphoneos/CoreMLProbe.app` | about `6.8G` |
+| Decoder `.mlmodelc` bundles in app | `48` |
+
+Both simulator and generic iOS Debug builds completed successfully for the
+48-layer bundle. The generic iOS build initially hit the usual code-signing
+failure for copied resource extended attributes (`resource fork, Finder
+information, or similar detritus not allowed`); clearing attributes from
+`Models` resolved it, and `build_coreml_probe_ios.sh` now also clears attributes
+inside each model bundle before invoking `xcodebuild`.
+
+The app now exposes `First 40` and `First 44` layer selections in addition to
+`First 48`. The recommended device order is:
+
+1. Delete the old app install if the app container/runtime cache may be stale.
+2. Run `Compute = CPU`, `Layers = First 48`, `Mode = full-stack-sequential`.
+3. If `First 48` fails, bisect with `First 40`, then `First 44`.
+4. If `full-stack-sequential` passes, run `load-decoder-stack` and
+   `decoder-stack` for `First 48`.
+
 ## Current limitations
 
 - This is a fixed seq=4, cache-free layer conversion. It proves operator and

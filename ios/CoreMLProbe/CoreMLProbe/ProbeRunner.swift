@@ -93,6 +93,8 @@ enum ProbeLayerSelection: String, CaseIterable, Identifiable {
     case first16 = "first-16"
     case first24 = "first-24"
     case first32 = "first-32"
+    case first40 = "first-40"
+    case first44 = "first-44"
     case first48 = "first-48"
     case all
 
@@ -107,6 +109,8 @@ enum ProbeLayerSelection: String, CaseIterable, Identifiable {
         case .first16: "First 16"
         case .first24: "First 24"
         case .first32: "First 32"
+        case .first40: "First 40"
+        case .first44: "First 44"
         case .first48: "First 48"
         case .all: "All available"
         }
@@ -121,6 +125,8 @@ enum ProbeLayerSelection: String, CaseIterable, Identifiable {
         case .first16: 16
         case .first24: 24
         case .first32: 32
+        case .first40: 40
+        case .first44: 44
         case .first48: 48
         case .all: nil
         }
@@ -155,6 +161,8 @@ enum ProbeLayerSelection: String, CaseIterable, Identifiable {
         case "16": .first16
         case "24": .first24
         case "32": .first32
+        case "40": .first40
+        case "44": .first44
         case "48": .first48
         default: nil
         }

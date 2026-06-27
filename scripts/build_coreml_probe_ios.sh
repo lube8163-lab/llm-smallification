@@ -7,6 +7,9 @@ DERIVED_DATA="$ROOT_DIR/.derived-data/CoreMLProbe"
 DESTINATION="${1:-platform=iOS Simulator,name=iPhone 17,OS=26.5}"
 
 xattr -cr "$ROOT_DIR/ios/CoreMLProbe/CoreMLProbe" "$DERIVED_DATA" 2>/dev/null || true
+if [[ -d "$ROOT_DIR/ios/CoreMLProbe/CoreMLProbe/Models" ]]; then
+  find "$ROOT_DIR/ios/CoreMLProbe/CoreMLProbe/Models" -mindepth 0 -exec xattr -c {} + 2>/dev/null || true
+fi
 
 xcodebuild \
   -project "$PROJECT" \

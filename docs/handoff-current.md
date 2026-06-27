@@ -40,9 +40,14 @@ Use this when continuing in a fresh Codex chat.
   - `decoder-stack`: peak `251.8 MB`
   - `generate-one-token`: peak `252.1 MB`, next token `#253027 1.747`,
     timed steps about `66.2 sec`
+  - `generate-token-loop`: peak `260.0 MB`, tokens `#253027,#253027`,
+    timed steps about `150.8 sec`
 - In `generate-one-token`, most time is model load/release overhead:
   about `63.7 sec` of timed steps were package loads, while all 48 decoder
   predictions totaled about `1.4 sec`.
+- In the 2-token loop, timed steps were dominated by decoder package loads:
+  about `120.2 sec` of `150.8 sec`; decoder predictions totaled about
+  `2.8 sec`.
 - Earlier 24-layer crash was traced to Core ML/E5RT runtime cache pressure. The
   app now clears `com.apple.e5rt.e5bundlecache` at run start and after each model
   release.
@@ -59,23 +64,24 @@ Use this when continuing in a fresh Codex chat.
 - Accept prompt IDs via `COREML_PROBE_INPUT_IDS` or `--input-ids=`.
 - Accept generated token count via `COREML_PROBE_GENERATE_TOKENS` or
   `--tokens=`. The app clamps the UI to `1...4`.
+- Accept cache-clear policy via `COREML_PROBE_CACHE_POLICY`, `--cache-policy=`,
+  or the Cache picker. Values: `every-model`, `every-4-layers`,
+  `every-8-layers`, `per-token`, `run-end-only`.
 - Run embedding -> selected decoder layers -> last-token LM head -> argmax.
 - Log `Prompt IDs` and `Next token`.
 - A simple app icon exists in `Assets.xcassets/AppIcon.appiconset`.
 
 ## Recommended next step
 
-Move toward a minimally usable text loop:
+Measure cache-clear policy before moving further into chat UI:
 
 1. Test `Mode = Generate token loop`, `Layers = First 48`, `Tokens = 2`,
-   `Compute = CPU` on device.
-2. Compare timing against the one-token result to see how much endpoint reuse
-   helps.
-3. Add tokenizer/prompt formatting or a host-side helper that feeds known token
-   IDs.
-4. Decide whether to keep model packages hot, group layer residency, or keep the
-   strict load/predict/release path for memory headroom.
-5. Re-test CPU-only first before accelerator experiments.
+   `Compute = CPU`, `Cache = Every 8 layers` on device.
+2. If it passes, try `Every 4 layers`, then `Per token`, then `Run end`.
+3. Compare total time, peak memory, and E5RT/cache stability against the
+   `every-model` baseline.
+4. Add tokenizer/prompt formatting or a host-side helper that feeds known token
+   IDs after choosing a cache policy.
 
 ## Useful commands
 

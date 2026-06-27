@@ -186,6 +186,79 @@ enum ProbeLayerSelection: String, CaseIterable, Identifiable {
     }
 }
 
+enum ProbeCacheClearPolicy: String, CaseIterable, Identifiable {
+    case afterEveryModel = "every-model"
+    case afterEvery4DecoderLayers = "every-4-layers"
+    case afterEvery8DecoderLayers = "every-8-layers"
+    case afterEachToken = "per-token"
+    case runEndOnly = "run-end-only"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .afterEveryModel: "Every model"
+        case .afterEvery4DecoderLayers: "Every 4 layers"
+        case .afterEvery8DecoderLayers: "Every 8 layers"
+        case .afterEachToken: "Per token"
+        case .runEndOnly: "Run end"
+        }
+    }
+
+    var clearsAfterNonDecoderRelease: Bool {
+        self == .afterEveryModel
+    }
+
+    var clearsAtRunEnd: Bool {
+        self != .afterEveryModel
+    }
+
+    func decoderReleaseReason(layerPosition: Int, totalLayers: Int, layerName: String) -> String? {
+        let isLastLayer = layerPosition == totalLayers
+        switch self {
+        case .afterEveryModel:
+            return "released \(layerName)"
+        case .afterEvery4DecoderLayers where layerPosition.isMultiple(of: 4) || isLastLayer:
+            return "released \(layerName) policy=\(rawValue) position=\(layerPosition)/\(totalLayers)"
+        case .afterEvery8DecoderLayers where layerPosition.isMultiple(of: 8) || isLastLayer:
+            return "released \(layerName) policy=\(rawValue) position=\(layerPosition)/\(totalLayers)"
+        case .afterEvery4DecoderLayers, .afterEvery8DecoderLayers, .afterEachToken, .runEndOnly:
+            return nil
+        }
+    }
+
+    static func selectedFromProcess(default fallback: ProbeCacheClearPolicy) -> ProbeCacheClearPolicy {
+        let environment = ProcessInfo.processInfo.environment
+        if let value = environment["COREML_PROBE_CACHE_POLICY"], let policy = policy(from: value) {
+            return policy
+        }
+
+        let prefix = "--cache-policy="
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) }) {
+            let value = String(argument.dropFirst(prefix.count))
+            if let policy = policy(from: value) {
+                return policy
+            }
+        }
+        return fallback
+    }
+
+    private static func policy(from value: String) -> ProbeCacheClearPolicy? {
+        if let policy = ProbeCacheClearPolicy(rawValue: value) {
+            return policy
+        }
+
+        return switch value {
+        case "every-layer", "every": .afterEveryModel
+        case "4", "every-4", "after-4": .afterEvery4DecoderLayers
+        case "8", "every-8", "after-8": .afterEvery8DecoderLayers
+        case "token", "each-token": .afterEachToken
+        case "end", "run-end": .runEndOnly
+        default: nil
+        }
+    }
+}
+
 struct ProbeStep: Identifiable {
     let id = UUID()
     let name: String
@@ -286,14 +359,15 @@ enum ProbeRunner {
         computeSelection: ProbeComputeSelection,
         mode: ProbeRunMode,
         layerSelection: ProbeLayerSelection,
+        cacheClearPolicy: ProbeCacheClearPolicy = .afterEveryModel,
         inputIDsText: String? = nil,
         generatedTokenCount: Int? = nil
     ) -> Result<ProbeReport, ProbeFailure> {
         var steps: [ProbeStep] = []
 
         do {
-            print("[CoreMLProbe] run started compute=\(computeSelection.title) mode=\(mode.rawValue) layers=\(layerSelection.rawValue)")
-            recordStep("Start", detail: "\(computeSelection.title), \(mode.title), \(layerSelection.title)", steps: &steps)
+            print("[CoreMLProbe] run started compute=\(computeSelection.title) mode=\(mode.rawValue) layers=\(layerSelection.rawValue) cache=\(cacheClearPolicy.rawValue)")
+            recordStep("Start", detail: "\(computeSelection.title), \(mode.title), \(layerSelection.title), cache=\(cacheClearPolicy.title)", steps: &steps)
             clearCoreMLRuntimeCache(reason: "run start", steps: &steps)
 
             let config = MLModelConfiguration()
@@ -302,29 +376,69 @@ enum ProbeRunner {
             let summary: String
             switch mode {
             case .loadEmbedding:
-                try runLoadOnly(named: embeddingName, config: config, steps: &steps)
+                try runLoadOnly(
+                    named: embeddingName,
+                    config: config,
+                    cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(embeddingName)" : nil,
+                    steps: &steps
+                )
                 summary = "OK: loaded embedding"
             case .loadDecoder:
-                try runLoadOnly(named: decoderName, config: config, steps: &steps)
+                try runLoadOnly(
+                    named: decoderName,
+                    config: config,
+                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderName),
+                    steps: &steps
+                )
                 summary = "OK: loaded layer 0"
             case .loadLMHead:
-                try runLoadOnly(named: lmHeadName, config: config, steps: &steps)
+                try runLoadOnly(
+                    named: lmHeadName,
+                    config: config,
+                    cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(lmHeadName)" : nil,
+                    steps: &steps
+                )
                 summary = "OK: loaded LM head"
             case .loadAllSequential:
-                try runLoadOnly(named: embeddingName, config: config, steps: &steps)
-                try runLoadOnly(named: decoderName, config: config, steps: &steps)
-                try runLoadOnly(named: lmHeadName, config: config, steps: &steps)
+                try runLoadOnly(
+                    named: embeddingName,
+                    config: config,
+                    cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(embeddingName)" : nil,
+                    steps: &steps
+                )
+                try runLoadOnly(
+                    named: decoderName,
+                    config: config,
+                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderName),
+                    steps: &steps
+                )
+                try runLoadOnly(
+                    named: lmHeadName,
+                    config: config,
+                    cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(lmHeadName)" : nil,
+                    steps: &steps
+                )
                 summary = "OK: loaded all sequentially"
             case .loadDecoderStack:
                 let plan = try decoderLayerPlan(selection: layerSelection)
                 recordStep("Decoder stack", detail: plan.detail, steps: &steps)
-                for layer in plan.layers {
-                    try runLoadOnly(named: layer.name, config: config, steps: &steps)
+                for (offset, layer) in plan.layers.enumerated() {
+                    let layerPosition = offset + 1
+                    try runLoadOnly(
+                        named: layer.name,
+                        config: config,
+                        cacheClearReason: cacheClearPolicy.decoderReleaseReason(
+                            layerPosition: layerPosition,
+                            totalLayers: plan.layers.count,
+                            layerName: layer.name
+                        ),
+                        steps: &steps
+                    )
                 }
                 summary = "OK: loaded \(plan.layers.count) decoder layers"
             case .embeddingOnly:
                 let inputIDs = try selectedInputIDs(overrideText: inputIDsText)
-                let hidden = try runEmbedding(config: config, inputIDs: inputIDs, steps: &steps)
+                let hidden = try runEmbedding(config: config, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 summary = "OK: hidden \(hidden.shape)"
             case .decoderOnly:
                 let hidden = try makeHidden(seqLength: 4)
@@ -332,6 +446,7 @@ enum ProbeRunner {
                     layer: DecoderLayerModel(index: 0, name: decoderName),
                     hidden: hidden,
                     config: config,
+                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderName),
                     steps: &steps
                 )
                 summary = "OK: decoded \(decoded.shape)"
@@ -341,39 +456,42 @@ enum ProbeRunner {
                     hidden: hidden,
                     config: config,
                     layerSelection: layerSelection,
+                    cacheClearPolicy: cacheClearPolicy,
                     steps: &steps
                 )
                 summary = "OK: decoded stack \(decoded.shape)"
             case .lmHeadOnly:
-                let logits = try runLMHead(hidden: try makeLastHidden(), config: config, steps: &steps)
+                let logits = try runLMHead(hidden: try makeLastHidden(), config: config, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let top = topLogitSummary(logits)
                 recordStep("Top logits", detail: top, steps: &steps)
                 summary = "OK: \(top)"
             case .fullSequential:
                 let inputIDs = try selectedInputIDs(overrideText: inputIDsText)
-                let hidden = try runEmbedding(config: config, inputIDs: inputIDs, steps: &steps)
+                let hidden = try runEmbedding(config: config, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let decoded = try runDecoder(
                     layer: DecoderLayerModel(index: 0, name: decoderName),
                     hidden: hidden,
                     config: config,
+                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderName),
                     steps: &steps
                 )
                 let lastHidden = try copyLastToken(from: decoded)
-                let logits = try runLMHead(hidden: lastHidden, config: config, steps: &steps)
+                let logits = try runLMHead(hidden: lastHidden, config: config, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let top = topLogitSummary(logits)
                 recordStep("Top logits", detail: top, steps: &steps)
                 summary = "OK: \(top)"
             case .fullStackSequential:
                 let inputIDs = try selectedInputIDs(overrideText: inputIDsText)
-                let hidden = try runEmbedding(config: config, inputIDs: inputIDs, steps: &steps)
+                let hidden = try runEmbedding(config: config, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let decoded = try runDecoderStack(
                     hidden: hidden,
                     config: config,
                     layerSelection: layerSelection,
+                    cacheClearPolicy: cacheClearPolicy,
                     steps: &steps
                 )
                 let lastHidden = try copyLastToken(from: decoded)
-                let logits = try runLMHead(hidden: lastHidden, config: config, steps: &steps)
+                let logits = try runLMHead(hidden: lastHidden, config: config, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let top = topLogitSummary(logits)
                 recordStep("Top logits", detail: top, steps: &steps)
                 summary = "OK: \(top)"
@@ -381,6 +499,7 @@ enum ProbeRunner {
                 let token = try runGenerateOneToken(
                     config: config,
                     layerSelection: layerSelection,
+                    cacheClearPolicy: cacheClearPolicy,
                     inputIDsText: inputIDsText,
                     steps: &steps
                 )
@@ -389,12 +508,17 @@ enum ProbeRunner {
                 let predictions = try runGenerateTokenLoop(
                     config: config,
                     layerSelection: layerSelection,
+                    cacheClearPolicy: cacheClearPolicy,
                     inputIDsText: inputIDsText,
                     generatedTokenCount: generatedTokenCount,
                     steps: &steps
                 )
                 let tokens = predictions.map { "#\($0.index)" }.joined(separator: ",")
                 summary = "OK: generated \(predictions.count) tokens \(tokens)"
+            }
+
+            if cacheClearPolicy.clearsAtRunEnd {
+                clearCoreMLRuntimeCache(reason: "run end policy=\(cacheClearPolicy.rawValue)", steps: &steps)
             }
 
             print("[CoreMLProbe] run finished \(summary)")
@@ -416,18 +540,26 @@ enum ProbeRunner {
         print("[CoreMLProbe] \(step.name) duration=\(step.durationText) memory=\(step.memoryText) detail=\(step.detail)")
     }
 
-    private static func runLoadOnly(named name: String, config: MLModelConfiguration, steps: inout [ProbeStep]) throws {
+    private static func runLoadOnly(
+        named name: String,
+        config: MLModelConfiguration,
+        cacheClearReason: String?,
+        steps: inout [ProbeStep]
+    ) throws {
         try autoreleasepool {
             _ = try loadModel(named: name, config: config, steps: &steps)
             recordStep("Loaded \(name)", detail: "leaving autorelease scope", steps: &steps)
         }
         recordStep("Released \(name)", detail: "ARC scope exited", steps: &steps)
-        clearCoreMLRuntimeCache(reason: "released \(name)", steps: &steps)
+        if let cacheClearReason {
+            clearCoreMLRuntimeCache(reason: cacheClearReason, steps: &steps)
+        }
     }
 
     private static func runEmbedding(
         config: MLModelConfiguration,
         inputIDs: [Int32],
+        cacheClearPolicy: ProbeCacheClearPolicy,
         steps: inout [ProbeStep]
     ) throws -> MLMultiArray {
         recordStep("Prompt IDs", detail: inputIDs.map(String.init).joined(separator: ","), steps: &steps)
@@ -437,26 +569,30 @@ enum ProbeRunner {
             return try predictEmbedding(model: embedding, inputIDs: inputIDs, name: "Embedding", steps: &steps)
         }
         recordStep("Released \(embeddingName)", detail: "hidden retained", steps: &steps)
-        clearCoreMLRuntimeCache(reason: "released \(embeddingName)", steps: &steps)
+        if cacheClearPolicy.clearsAfterNonDecoderRelease {
+            clearCoreMLRuntimeCache(reason: "released \(embeddingName)", steps: &steps)
+        }
         return hidden
     }
 
     private static func runGenerateOneToken(
         config: MLModelConfiguration,
         layerSelection: ProbeLayerSelection,
+        cacheClearPolicy: ProbeCacheClearPolicy,
         inputIDsText: String?,
         steps: inout [ProbeStep]
     ) throws -> (index: Int, logit: Float) {
         let inputIDs = try selectedInputIDs(overrideText: inputIDsText)
-        let hidden = try runEmbedding(config: config, inputIDs: inputIDs, steps: &steps)
+        let hidden = try runEmbedding(config: config, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
         let decoded = try runDecoderStack(
             hidden: hidden,
             config: config,
             layerSelection: layerSelection,
+            cacheClearPolicy: cacheClearPolicy,
             steps: &steps
         )
         let lastHidden = try copyLastToken(from: decoded)
-        let logits = try runLMHead(hidden: lastHidden, config: config, steps: &steps)
+        let logits = try runLMHead(hidden: lastHidden, config: config, cacheClearPolicy: cacheClearPolicy, steps: &steps)
         let token = try topLogit(logits)
         recordStep(
             "Next token",
@@ -469,6 +605,7 @@ enum ProbeRunner {
     private static func runGenerateTokenLoop(
         config: MLModelConfiguration,
         layerSelection: ProbeLayerSelection,
+        cacheClearPolicy: ProbeCacheClearPolicy,
         inputIDsText: String?,
         generatedTokenCount: Int?,
         steps: inout [ProbeStep]
@@ -477,7 +614,7 @@ enum ProbeRunner {
         let tokenCount = try selectedGeneratedTokenCount(override: generatedTokenCount)
         recordStep(
             "Generation loop",
-            detail: "tokens=\(tokenCount) strategy=reuse embedding+lm-head reload decoder stack",
+            detail: "tokens=\(tokenCount) strategy=reuse embedding+lm-head reload decoder stack cache=\(cacheClearPolicy.rawValue)",
             steps: &steps
         )
 
@@ -499,6 +636,7 @@ enum ProbeRunner {
                         hidden: hidden,
                         config: config,
                         layerSelection: layerSelection,
+                        cacheClearPolicy: cacheClearPolicy,
                         steps: &steps
                     )
                     let lastHidden = try copyLastToken(from: decoded)
@@ -517,6 +655,10 @@ enum ProbeRunner {
                     return TokenPrediction(step: step, index: token.index, logit: token.logit)
                 }
 
+                if cacheClearPolicy == .afterEachToken {
+                    clearCoreMLRuntimeCache(reason: "generated token \(step) policy=\(cacheClearPolicy.rawValue)", steps: &steps)
+                }
+
                 guard let nextToken = Int32(exactly: prediction.index) else {
                     throw ProbeError.invalidInputIDs("generated token does not fit Int32: \(prediction.index)")
                 }
@@ -529,7 +671,9 @@ enum ProbeRunner {
         }
 
         recordStep("Released generation endpoints", detail: "\(embeddingName), \(lmHeadName)", steps: &steps)
-        clearCoreMLRuntimeCache(reason: "released generation endpoints", steps: &steps)
+        if cacheClearPolicy.clearsAfterNonDecoderRelease {
+            clearCoreMLRuntimeCache(reason: "released generation endpoints", steps: &steps)
+        }
         let detail = predictions
             .map { "\($0.step):#\($0.index)=\(String(format: "%.3f", $0.logit))" }
             .joined(separator: ", ")
@@ -541,14 +685,26 @@ enum ProbeRunner {
         hidden: MLMultiArray,
         config: MLModelConfiguration,
         layerSelection: ProbeLayerSelection,
+        cacheClearPolicy: ProbeCacheClearPolicy,
         steps: inout [ProbeStep]
     ) throws -> MLMultiArray {
         let plan = try decoderLayerPlan(selection: layerSelection)
         recordStep("Decoder stack", detail: plan.detail, steps: &steps)
 
         var current = hidden
-        for layer in plan.layers {
-            current = try runDecoder(layer: layer, hidden: current, config: config, steps: &steps)
+        for (offset, layer) in plan.layers.enumerated() {
+            let layerPosition = offset + 1
+            current = try runDecoder(
+                layer: layer,
+                hidden: current,
+                config: config,
+                cacheClearReason: cacheClearPolicy.decoderReleaseReason(
+                    layerPosition: layerPosition,
+                    totalLayers: plan.layers.count,
+                    layerName: layer.name
+                ),
+                steps: &steps
+            )
         }
         return current
     }
@@ -557,6 +713,7 @@ enum ProbeRunner {
         layer: DecoderLayerModel,
         hidden: MLMultiArray,
         config: MLModelConfiguration,
+        cacheClearReason: String?,
         steps: inout [ProbeStep]
     ) throws -> MLMultiArray {
         let decoded = try autoreleasepool {
@@ -576,7 +733,9 @@ enum ProbeRunner {
             return try requireArray(named: "y", output: output)
         }
         recordStep("Released \(layer.name)", detail: "decoded retained", steps: &steps)
-        clearCoreMLRuntimeCache(reason: "released \(layer.name)", steps: &steps)
+        if let cacheClearReason {
+            clearCoreMLRuntimeCache(reason: cacheClearReason, steps: &steps)
+        }
         return decoded
     }
 
@@ -624,13 +783,20 @@ enum ProbeRunner {
         )
     }
 
-    private static func runLMHead(hidden: MLMultiArray, config: MLModelConfiguration, steps: inout [ProbeStep]) throws -> MLMultiArray {
+    private static func runLMHead(
+        hidden: MLMultiArray,
+        config: MLModelConfiguration,
+        cacheClearPolicy: ProbeCacheClearPolicy,
+        steps: inout [ProbeStep]
+    ) throws -> MLMultiArray {
         let logits = try autoreleasepool {
             let lmHead = try loadModel(named: lmHeadName, config: config, steps: &steps)
             return try predictLMHead(model: lmHead, hidden: hidden, name: "LM head", steps: &steps)
         }
         recordStep("Released \(lmHeadName)", detail: "logits retained", steps: &steps)
-        clearCoreMLRuntimeCache(reason: "released \(lmHeadName)", steps: &steps)
+        if cacheClearPolicy.clearsAfterNonDecoderRelease {
+            clearCoreMLRuntimeCache(reason: "released \(lmHeadName)", steps: &steps)
+        }
         return logits
     }
 

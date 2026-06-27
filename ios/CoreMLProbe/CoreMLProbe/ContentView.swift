@@ -24,6 +24,11 @@ struct ContentView: View {
                             Text(selection.title).tag(selection)
                         }
                     }
+                    Picker("Cache", selection: $viewModel.cacheClearPolicy) {
+                        ForEach(ProbeCacheClearPolicy.allCases) { policy in
+                            Text(policy.title).tag(policy)
+                        }
+                    }
                     if viewModel.runMode.usesInputIDs {
                         TextField("Input IDs", text: $viewModel.inputIDsText)
                             .keyboardType(.numbersAndPunctuation)
@@ -93,6 +98,7 @@ final class ProbeViewModel: ObservableObject {
     @Published var runMode = ProbeRunMode.selectedFromProcess(default: .loadEmbedding)
     @Published var computeSelection = ProbeComputeSelection.selectedFromProcess(default: .cpuOnly)
     @Published var layerSelection = ProbeLayerSelection.selectedFromProcess(default: .first8)
+    @Published var cacheClearPolicy = ProbeCacheClearPolicy.selectedFromProcess(default: .afterEveryModel)
     @Published var inputIDsText = ProbeRunner.selectedInputIDsTextFromProcess()
     @Published var generatedTokenCount = ProbeRunner.selectedGeneratedTokenCountFromProcess()
     @Published var isRunning = false
@@ -123,6 +129,7 @@ final class ProbeViewModel: ObservableObject {
         let computeSelection = computeSelection
         let runMode = runMode
         let layerSelection = layerSelection
+        let cacheClearPolicy = cacheClearPolicy
         let inputIDsText = inputIDsText
         let generatedTokenCount = generatedTokenCount
         Task {
@@ -131,6 +138,7 @@ final class ProbeViewModel: ObservableObject {
                     computeSelection: computeSelection,
                     mode: runMode,
                     layerSelection: layerSelection,
+                    cacheClearPolicy: cacheClearPolicy,
                     inputIDsText: inputIDsText,
                     generatedTokenCount: generatedTokenCount
                 )

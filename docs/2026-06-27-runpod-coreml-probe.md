@@ -319,6 +319,7 @@ device with CPU-only sequential load/predict/release.
 | `load-decoder-stack` | loaded 48 decoder layers | 252.3 MB | completed all 48 layer load/release cycles |
 | `decoder-stack` | decoded `[1,4,3840]` through 48 layers | 251.8 MB | completed all 48 decoder predictions |
 | `generate-one-token` | prompt IDs `2,123,4567,106`, 48 layers, last-token lm head, argmax completed | 252.1 MB | next token `#253027 1.747`; timed steps about 66.2 sec |
+| `generate-token-loop` | 2 argmax tokens with sliding fixed 4-token window | 260.0 MB | tokens `#253027,#253027`; timed steps about 150.8 sec |
 
 This is the first end-to-end fixed-shape `seq=4` CPU-only proof that all 48
 int4 decoder packages can be streamed on the target iPhone without memory
@@ -332,6 +333,12 @@ about 63.7 sec of timed steps were model loads, about 0.9 sec was cache
 cleanup, and the 48 decoder predictions themselves totaled about 1.4 sec.
 That makes the next optimization target package residency/caching strategy
 rather than decoder matmul time.
+
+The 2-token loop confirms the minimal repeated-generation path. Its timed
+steps were about 150.8 sec total: decoder package loads were about 120.2 sec,
+decoder predictions about 2.8 sec, LM head predictions about 3.6 sec, endpoint
+model loads about 22.3 sec, and cache cleanup about 1.8 sec. The memory peak
+remained low enough that cache-clear frequency is now worth testing directly.
 
 ## Current limitations
 
@@ -350,16 +357,14 @@ rather than decoder matmul time.
 
 ## Next step
 
-Move from the validated fixed-ID one-token probe toward a minimally usable text
-loop. The first code step is `generate-token-loop`, which keeps a 4-token window,
-generates a short sequence by argmax, and reuses the embedding and LM head
-models across generated tokens while continuing to load/release decoder layers.
+Measure cache-clear policy before adding a fuller chat UI. The app supports
+`every-model` (current/safest), `every-4-layers`, `every-8-layers`, `per-token`,
+and `run-end-only` via the Cache picker, `COREML_PROBE_CACHE_POLICY`, or
+`--cache-policy=`.
 
-1. Test `generate-token-loop` with `Tokens = 2` and `Layers = First 48`.
-2. Compare the loop timing against the one-token result to quantify how much
-   endpoint model reuse saves.
-3. Add a tiny tokenizer/prompt-format layer or a host-side helper that feeds
-   known-good token IDs.
-4. Decide whether to keep packages hot for multiple tokens, use grouped layer
-   residency, or continue strict load/predict/release for memory headroom.
-5. Re-test CPU-only first, then evaluate accelerator scheduling separately.
+1. Re-test `generate-token-loop` with `Tokens = 2`, `Layers = First 48`, and
+   `Cache = Every 8 layers`.
+2. If that passes, try `Every 4 layers`, then `Per token`, then `Run end`.
+3. Record total time, peak memory, and whether any E5RT/cache failure returns.
+4. Add tokenizer/prompt formatting or a host-side helper that feeds known-good
+   token IDs after a cache policy is selected.

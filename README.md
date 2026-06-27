@@ -76,6 +76,7 @@ the full pipeline. Useful scheme arguments or launch environment values:
 --autorun --mode=full-stack-sequential --layers=16
 --autorun --mode=generate-one-token --layers=48 --input-ids=2,123,4567,106
 --autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=2
+--autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=2 --cache-policy=every-8-layers
 ```
 
 ```bash
@@ -84,6 +85,7 @@ COREML_PROBE_COMPUTE=cpuOnly
 COREML_PROBE_LAYERS=16
 COREML_PROBE_INPUT_IDS=2,123,4567,106
 COREML_PROBE_GENERATE_TOKENS=2
+COREML_PROBE_CACHE_POLICY=every-model
 ```
 
 The app defaults to `load-embedding` and `cpuOnly` to avoid loading multiple
@@ -98,6 +100,10 @@ discover them automatically by layer index.
 and slides the window for a very short generation loop. It reuses the embedding
 and LM head models across generated tokens, while decoder layers still use the
 safer load/predict/release path.
+
+The cache policy controls how often `com.apple.e5rt.e5bundlecache` is removed
+after model release. Supported values are `every-model` (default/safest),
+`every-4-layers`, `every-8-layers`, `per-token`, and `run-end-only`.
 
 For an actual iPhone, open `ios/CoreMLProbe/CoreMLProbe.xcodeproj` in Xcode,
 select a signing team, choose the device, and run the `CoreMLProbe` scheme.

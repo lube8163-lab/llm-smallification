@@ -243,6 +243,21 @@ the probe slower, but it better matches the staged streaming experiment because
 old compiled BNNS bundles should not accumulate while measuring sequential
 load/predict/release behavior.
 
+## iPhone CPU-only 24-layer cache-cleaning smoke
+
+After deleting the old app install and reinstalling the cache-cleaning build,
+`First 24` completed `full-stack-sequential` on iPhone18,3 with CPU-only
+execution.
+
+| Mode | Result | Peak footprint in log | Notable timing |
+| --- | --- | ---: | ---: |
+| `full-stack-sequential` | embedding, 24 layers, lm head completed | 188.1 MB | decoder predictions were about 0.03 sec after load; lm head 0.2239 sec |
+
+`Clear Core ML cache` appeared after each model release, confirming that
+`com.apple.e5rt.e5bundlecache` was removed during the run. The previous
+24-layer failure was therefore most likely stale or accumulated Core ML runtime
+cache pressure rather than a direct 24-layer memory ceiling.
+
 ## Current limitations
 
 - This is a fixed seq=4, cache-free layer conversion. It proves operator and
@@ -257,16 +272,15 @@ load/predict/release behavior.
 
 ## Next step
 
-Install the cache-cleaning build and rerun the CPU-only iPhone probe with
-`Layers = First 24`. Start with:
+Run the cache-cleaning build with `Layers = First 32`. Start with:
 
 1. `full-stack-sequential`
 
-If that still fails, capture the first `No space left on device` or memory
-pressure point. If it passes, repeat with:
+If that passes, repeat with:
 
 1. `load-decoder-stack`
 2. `decoder-stack`
 3. `full-stack-sequential`
 
-Then move to `Layers = First 32` only after 24 layers pass cleanly.
+If it fails, capture the first `No space left on device`, `Clear Core ML cache`,
+or memory-pressure point.

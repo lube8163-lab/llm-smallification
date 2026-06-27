@@ -85,6 +85,82 @@ enum ProbeRunMode: String, CaseIterable, Identifiable {
     }
 }
 
+enum ProbeLayerSelection: String, CaseIterable, Identifiable {
+    case first1 = "first-1"
+    case first2 = "first-2"
+    case first4 = "first-4"
+    case first8 = "first-8"
+    case first16 = "first-16"
+    case first24 = "first-24"
+    case first32 = "first-32"
+    case first48 = "first-48"
+    case all
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .first1: "First 1"
+        case .first2: "First 2"
+        case .first4: "First 4"
+        case .first8: "First 8"
+        case .first16: "First 16"
+        case .first24: "First 24"
+        case .first32: "First 32"
+        case .first48: "First 48"
+        case .all: "All available"
+        }
+    }
+
+    var requestedCount: Int? {
+        switch self {
+        case .first1: 1
+        case .first2: 2
+        case .first4: 4
+        case .first8: 8
+        case .first16: 16
+        case .first24: 24
+        case .first32: 32
+        case .first48: 48
+        case .all: nil
+        }
+    }
+
+    static func selectedFromProcess(default fallback: ProbeLayerSelection) -> ProbeLayerSelection {
+        let environment = ProcessInfo.processInfo.environment
+        if let value = environment["COREML_PROBE_LAYERS"], let selection = selection(from: value) {
+            return selection
+        }
+
+        let prefix = "--layers="
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) }) {
+            let value = String(argument.dropFirst(prefix.count))
+            if let selection = selection(from: value) {
+                return selection
+            }
+        }
+        return fallback
+    }
+
+    private static func selection(from value: String) -> ProbeLayerSelection? {
+        if let selection = ProbeLayerSelection(rawValue: value) {
+            return selection
+        }
+
+        return switch value {
+        case "1": .first1
+        case "2": .first2
+        case "4": .first4
+        case "8": .first8
+        case "16": .first16
+        case "24": .first24
+        case "32": .first32
+        case "48": .first48
+        default: nil
+        }
+    }
+}
+
 struct ProbeStep: Identifiable {
     let id = UUID()
     let name: String
@@ -117,6 +193,17 @@ struct DecoderLayerModel {
     let name: String
 }
 
+struct DecoderLayerPlan {
+    let availableCount: Int
+    let layers: [DecoderLayerModel]
+    let selection: ProbeLayerSelection
+
+    var detail: String {
+        let requested = selection.requestedCount.map(String.init) ?? "all"
+        return "selected=\(layers.count), available=\(availableCount), requested=\(requested)"
+    }
+}
+
 enum ProbeMemory {
     static func currentMB() -> Double {
         var info = task_vm_info_data_t()
@@ -144,12 +231,16 @@ enum ProbeRunner {
     private static let decoderSuffix = "_decoder_seq4_mask_int4_block32"
     private static let lmHeadName = "gemma4_12b_lm_head_1tok_int4_block32"
 
-    static func run(computeSelection: ProbeComputeSelection, mode: ProbeRunMode) -> Result<ProbeReport, ProbeFailure> {
+    static func run(
+        computeSelection: ProbeComputeSelection,
+        mode: ProbeRunMode,
+        layerSelection: ProbeLayerSelection
+    ) -> Result<ProbeReport, ProbeFailure> {
         var steps: [ProbeStep] = []
 
         do {
-            print("[CoreMLProbe] run started compute=\(computeSelection.title) mode=\(mode.rawValue)")
-            recordStep("Start", detail: "\(computeSelection.title), \(mode.title)", steps: &steps)
+            print("[CoreMLProbe] run started compute=\(computeSelection.title) mode=\(mode.rawValue) layers=\(layerSelection.rawValue)")
+            recordStep("Start", detail: "\(computeSelection.title), \(mode.title), \(layerSelection.title)", steps: &steps)
 
             let config = MLModelConfiguration()
             config.computeUnits = computeSelection.units
@@ -171,12 +262,12 @@ enum ProbeRunner {
                 try runLoadOnly(named: lmHeadName, config: config, steps: &steps)
                 summary = "OK: loaded all sequentially"
             case .loadDecoderStack:
-                let layers = try decoderLayerModels()
-                recordStep("Decoder stack", detail: "count=\(layers.count)", steps: &steps)
-                for layer in layers {
+                let plan = try decoderLayerPlan(selection: layerSelection)
+                recordStep("Decoder stack", detail: plan.detail, steps: &steps)
+                for layer in plan.layers {
                     try runLoadOnly(named: layer.name, config: config, steps: &steps)
                 }
-                summary = "OK: loaded \(layers.count) decoder layers"
+                summary = "OK: loaded \(plan.layers.count) decoder layers"
             case .embeddingOnly:
                 let hidden = try runEmbedding(config: config, steps: &steps)
                 summary = "OK: hidden \(hidden.shape)"
@@ -191,7 +282,12 @@ enum ProbeRunner {
                 summary = "OK: decoded \(decoded.shape)"
             case .decoderStack:
                 let hidden = try makeHidden(seqLength: 4)
-                let decoded = try runDecoderStack(hidden: hidden, config: config, steps: &steps)
+                let decoded = try runDecoderStack(
+                    hidden: hidden,
+                    config: config,
+                    layerSelection: layerSelection,
+                    steps: &steps
+                )
                 summary = "OK: decoded stack \(decoded.shape)"
             case .lmHeadOnly:
                 let logits = try runLMHead(hidden: try makeLastHidden(), config: config, steps: &steps)
@@ -213,7 +309,12 @@ enum ProbeRunner {
                 summary = "OK: \(top)"
             case .fullStackSequential:
                 let hidden = try runEmbedding(config: config, steps: &steps)
-                let decoded = try runDecoderStack(hidden: hidden, config: config, steps: &steps)
+                let decoded = try runDecoderStack(
+                    hidden: hidden,
+                    config: config,
+                    layerSelection: layerSelection,
+                    steps: &steps
+                )
                 let lastHidden = try copyLastToken(from: decoded)
                 let logits = try runLMHead(hidden: lastHidden, config: config, steps: &steps)
                 let top = topLogitSummary(logits)
@@ -265,12 +366,17 @@ enum ProbeRunner {
         return hidden
     }
 
-    private static func runDecoderStack(hidden: MLMultiArray, config: MLModelConfiguration, steps: inout [ProbeStep]) throws -> MLMultiArray {
-        let layers = try decoderLayerModels()
-        recordStep("Decoder stack", detail: "count=\(layers.count)", steps: &steps)
+    private static func runDecoderStack(
+        hidden: MLMultiArray,
+        config: MLModelConfiguration,
+        layerSelection: ProbeLayerSelection,
+        steps: inout [ProbeStep]
+    ) throws -> MLMultiArray {
+        let plan = try decoderLayerPlan(selection: layerSelection)
+        recordStep("Decoder stack", detail: plan.detail, steps: &steps)
 
         var current = hidden
-        for layer in layers {
+        for layer in plan.layers {
             current = try runDecoder(layer: layer, hidden: current, config: config, steps: &steps)
         }
         return current
@@ -302,7 +408,7 @@ enum ProbeRunner {
         return decoded
     }
 
-    private static func decoderLayerModels() throws -> [DecoderLayerModel] {
+    private static func decoderLayerPlan(selection: ProbeLayerSelection) throws -> DecoderLayerPlan {
         var byIndex: [Int: DecoderLayerModel] = [:]
         let urls = Bundle.main.urls(forResourcesWithExtension: "mlmodelc", subdirectory: "Models") ?? []
 
@@ -331,7 +437,19 @@ enum ProbeRunner {
         guard !layers.isEmpty else {
             throw ProbeError.missingModel("\(decoderPrefix)*\(decoderSuffix).mlmodelc")
         }
-        return layers
+
+        let selectedLayers: [DecoderLayerModel]
+        if let count = selection.requestedCount {
+            selectedLayers = Array(layers.prefix(count))
+        } else {
+            selectedLayers = layers
+        }
+
+        return DecoderLayerPlan(
+            availableCount: layers.count,
+            layers: selectedLayers,
+            selection: selection
+        )
     }
 
     private static func runLMHead(hidden: MLMultiArray, config: MLModelConfiguration, steps: inout [ProbeStep]) throws -> MLMultiArray {

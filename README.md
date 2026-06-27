@@ -46,6 +46,7 @@ After copying selected compiled Core ML bundles from RunPod into
 `runpod-artifacts/compiled`, stage the app-local model assets:
 
 ```bash
+./scripts/compile_coreml_probe_packages.sh
 ./scripts/prepare_ios_coreml_probe_assets.sh
 ```
 
@@ -69,22 +70,25 @@ the full pipeline. Useful scheme arguments or launch environment values:
 --autorun --mode=load-decoder
 --autorun --mode=load-lm-head
 --autorun --mode=load-all-sequential
---autorun --mode=load-decoder-stack
---autorun --mode=decoder-stack
+--autorun --mode=load-decoder-stack --layers=16
+--autorun --mode=decoder-stack --layers=16
 --autorun --mode=full-sequential
---autorun --mode=full-stack-sequential
+--autorun --mode=full-stack-sequential --layers=16
 ```
 
 ```bash
 COREML_PROBE_MODE=load-lm-head
 COREML_PROBE_COMPUTE=cpuOnly
+COREML_PROBE_LAYERS=16
 ```
 
 The app defaults to `load-embedding` and `cpuOnly` to avoid loading multiple
-large bundles on the first run. Try `full-sequential` only after the individual
-loads and synthetic predictions pass. When additional decoder layer bundles are
-present in `Models/`, `load-decoder-stack`, `decoder-stack`, and
-`full-stack-sequential` discover them automatically by layer index.
+large bundles on the first run. Decoder stack modes default to the first 8
+layers and can be limited to `1`, `2`, `4`, `8`, `16`, `24`, `32`, `48`, or
+`all`. Try `full-sequential` only after the individual loads and synthetic
+predictions pass. When additional decoder layer bundles are present in
+`Models/`, `load-decoder-stack`, `decoder-stack`, and `full-stack-sequential`
+discover them automatically by layer index.
 
 For an actual iPhone, open `ios/CoreMLProbe/CoreMLProbe.xcodeproj` in Xcode,
 select a signing team, choose the device, and run the `CoreMLProbe` scheme.

@@ -19,6 +19,11 @@ struct ContentView: View {
                             Text(selection.title).tag(selection)
                         }
                     }
+                    Picker("Layers", selection: $viewModel.layerSelection) {
+                        ForEach(ProbeLayerSelection.allCases) { selection in
+                            Text(selection.title).tag(selection)
+                        }
+                    }
                     Button {
                         viewModel.run()
                     } label: {
@@ -76,6 +81,7 @@ struct ContentView: View {
 final class ProbeViewModel: ObservableObject {
     @Published var runMode = ProbeRunMode.selectedFromProcess(default: .loadEmbedding)
     @Published var computeSelection = ProbeComputeSelection.selectedFromProcess(default: .cpuOnly)
+    @Published var layerSelection = ProbeLayerSelection.selectedFromProcess(default: .first8)
     @Published var isRunning = false
     @Published var steps: [ProbeStep] = []
     @Published var summary = "Idle"
@@ -103,9 +109,14 @@ final class ProbeViewModel: ObservableObject {
 
         let computeSelection = computeSelection
         let runMode = runMode
+        let layerSelection = layerSelection
         Task {
             let result = await Task.detached(priority: .userInitiated) {
-                ProbeRunner.run(computeSelection: computeSelection, mode: runMode)
+                ProbeRunner.run(
+                    computeSelection: computeSelection,
+                    mode: runMode,
+                    layerSelection: layerSelection
+                )
             }.value
 
             switch result {

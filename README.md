@@ -77,6 +77,7 @@ the full pipeline. Useful scheme arguments or launch environment values:
 --autorun --mode=generate-one-token --layers=48 --input-ids=2,123,4567,106
 --autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=2
 --autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=2 --cache-policy=every-8-layers
+--autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=8 --cache-policy=run-end-only
 ```
 
 ```bash
@@ -84,8 +85,8 @@ COREML_PROBE_MODE=load-lm-head
 COREML_PROBE_COMPUTE=cpuOnly
 COREML_PROBE_LAYERS=16
 COREML_PROBE_INPUT_IDS=2,123,4567,106
-COREML_PROBE_GENERATE_TOKENS=2
-COREML_PROBE_CACHE_POLICY=every-model
+COREML_PROBE_GENERATE_TOKENS=8
+COREML_PROBE_CACHE_POLICY=run-end-only
 ```
 
 The app defaults to `load-embedding` and `cpuOnly` to avoid loading multiple

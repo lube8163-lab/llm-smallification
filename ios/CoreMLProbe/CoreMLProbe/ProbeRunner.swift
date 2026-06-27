@@ -336,7 +336,7 @@ enum ProbeRunner {
     private static let lmHeadName = "gemma4_12b_lm_head_1tok_int4_block32"
     private static let defaultInputIDs: [Int32] = [2, 123, 4567, 106]
     static let defaultGeneratedTokenCount = 2
-    static let maxGeneratedTokenCount = 4
+    static let maxGeneratedTokenCount = 8
 
     static var defaultInputIDsText: String {
         formatInputIDs(defaultInputIDs)

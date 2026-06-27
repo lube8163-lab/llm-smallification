@@ -42,6 +42,9 @@ Use this when continuing in a fresh Codex chat.
     timed steps about `66.2 sec`
   - `generate-token-loop`: peak `260.0 MB`, tokens `#253027,#253027`,
     timed steps about `150.8 sec`
+  - `generate-token-loop`, `Cache = Run end`, `Tokens = 4`: peak `253.0 MB`,
+    tokens `#253027,#253027,#253027,#253027`, timed steps about `243.1 sec`.
+    Token 1 peaked at `253.0 MB`; tokens 2-4 peaked around `40.2 MB`.
 - In `generate-one-token`, most time is model load/release overhead:
   about `63.7 sec` of timed steps were package loads, while all 48 decoder
   predictions totaled about `1.4 sec`.
@@ -63,7 +66,7 @@ Use this when continuing in a fresh Codex chat.
 - Keep the fixed 4-token shape.
 - Accept prompt IDs via `COREML_PROBE_INPUT_IDS` or `--input-ids=`.
 - Accept generated token count via `COREML_PROBE_GENERATE_TOKENS` or
-  `--tokens=`. The app clamps the UI to `1...4`.
+  `--tokens=`. The app clamps the UI to `1...8`.
 - Accept cache-clear policy via `COREML_PROBE_CACHE_POLICY`, `--cache-policy=`,
   or the Cache picker. Values: `every-model`, `every-4-layers`,
   `every-8-layers`, `per-token`, `run-end-only`.
@@ -73,15 +76,16 @@ Use this when continuing in a fresh Codex chat.
 
 ## Recommended next step
 
-Measure cache-clear policy before moving further into chat UI:
+The best current cache policy for generation is `Run end`: it keeps Core ML's
+runtime cache warm during a response, then clears it after the run. The next
+device probe should measure longer generation:
 
-1. Test `Mode = Generate token loop`, `Layers = First 48`, `Tokens = 2`,
-   `Compute = CPU`, `Cache = Every 8 layers` on device.
-2. If it passes, try `Every 4 layers`, then `Per token`, then `Run end`.
-3. Compare total time, peak memory, and E5RT/cache stability against the
-   `every-model` baseline.
-4. Add tokenizer/prompt formatting or a host-side helper that feeds known token
-   IDs after choosing a cache policy.
+1. Test `Mode = Generate token loop`, `Layers = First 48`, `Tokens = 8`,
+   `Compute = CPU`, `Cache = Run end` on device.
+2. Check whether tokens 2-8 stay near the observed steady-state footprint of
+   about `40 MB`.
+3. If stable, move to tokenizer/prompt formatting or a host-side helper that
+   feeds known token IDs.
 
 ## Useful commands
 

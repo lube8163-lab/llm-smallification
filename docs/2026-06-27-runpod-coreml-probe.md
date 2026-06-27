@@ -320,6 +320,7 @@ device with CPU-only sequential load/predict/release.
 | `decoder-stack` | decoded `[1,4,3840]` through 48 layers | 251.8 MB | completed all 48 decoder predictions |
 | `generate-one-token` | prompt IDs `2,123,4567,106`, 48 layers, last-token lm head, argmax completed | 252.1 MB | next token `#253027 1.747`; timed steps about 66.2 sec |
 | `generate-token-loop` | 2 argmax tokens with sliding fixed 4-token window | 260.0 MB | tokens `#253027,#253027`; timed steps about 150.8 sec |
+| `generate-token-loop`, `run-end-only` | 4 argmax tokens with sliding fixed 4-token window | 253.0 MB | tokens `#253027,#253027,#253027,#253027`; timed steps about 243.1 sec |
 
 This is the first end-to-end fixed-shape `seq=4` CPU-only proof that all 48
 int4 decoder packages can be streamed on the target iPhone without memory
@@ -340,6 +341,17 @@ decoder predictions about 2.8 sec, LM head predictions about 3.6 sec, endpoint
 model loads about 22.3 sec, and cache cleanup about 1.8 sec. The memory peak
 remained low enough that cache-clear frequency is now worth testing directly.
 
+Cache-policy testing then showed that `run-end-only` is the best current
+generation policy. `Every 8 layers`, `Every 4 layers`, and `Per token` all
+completed, but were slower than the original `every-model` baseline in the
+2-token test. `Run end` completed 2 tokens in about 141.5 sec with a peak near
+261 MB, then completed 4 tokens in about 243.1 sec with a peak near 253 MB. In
+the 4-token run, token 1 still carried the initial cache/build cost
+(`72.8 sec`, peak `253.0 MB`), while tokens 2-4 stabilized around
+`52.9-55.4 sec/token` and peak memory around `40.2 MB`. Decoder package load
+time after token 1 fell to roughly `0.5-0.8 sec` per full 48-layer pass; the
+steady-state cost moved to decoder prediction, about `49-50 sec/token`.
+
 ## Current limitations
 
 - This is a fixed seq=4, cache-free layer conversion. It proves operator and
@@ -357,14 +369,12 @@ remained low enough that cache-clear frequency is now worth testing directly.
 
 ## Next step
 
-Measure cache-clear policy before adding a fuller chat UI. The app supports
-`every-model` (current/safest), `every-4-layers`, `every-8-layers`, `per-token`,
-and `run-end-only` via the Cache picker, `COREML_PROBE_CACHE_POLICY`, or
-`--cache-policy=`.
+Use `run-end-only` as the preferred generation cache policy, then measure a
+longer token loop before adding a fuller chat UI.
 
-1. Re-test `generate-token-loop` with `Tokens = 2`, `Layers = First 48`, and
-   `Cache = Every 8 layers`.
-2. If that passes, try `Every 4 layers`, then `Per token`, then `Run end`.
-3. Record total time, peak memory, and whether any E5RT/cache failure returns.
-4. Add tokenizer/prompt formatting or a host-side helper that feeds known-good
-   token IDs after a cache policy is selected.
+1. Re-test `generate-token-loop` with `Tokens = 8`, `Layers = First 48`, and
+   `Cache = Run end`.
+2. Record whether tokens 2-8 keep the steady-state memory behavior observed in
+   the 4-token run.
+3. Add tokenizer/prompt formatting or a host-side helper that feeds known-good
+   token IDs after the longer loop is stable.

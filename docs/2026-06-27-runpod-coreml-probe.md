@@ -165,26 +165,50 @@ full-stack output top logit was `#121220 6.859`. This is still a fixed-shape
 seq=4, cache-free probe, but the sequential Core ML packaging approach looks
 healthy enough to scale the layer count in steps.
 
+## 16-layer staging for next iPhone smoke
+
+After redeploying RunPod with the preserved network volume attached, the remote
+artifact store was still intact:
+
+- `/workspace/gemma12b/coreml-layers-seq4-int4`
+- `48` layer packages
+- about `6.1G`
+
+Decoder layers 08-15 were copied to the Mac, compiled with
+`compile_coreml_probe_packages.sh`, and copied into the iOS probe with
+`prepare_ios_coreml_probe_assets.sh`. The probe app now contains embedding,
+LM head, and the first 16 decoder layers.
+
+| Artifact | Size / count |
+| --- | ---: |
+| `ios/CoreMLProbe/CoreMLProbe/Models` | about `3.0G` |
+| `Debug-iphonesimulator/CoreMLProbe.app` | about `3.0G` |
+| `Debug-iphoneos/CoreMLProbe.app` | about `3.0G` |
+| Decoder `.mlmodelc` bundles in app | `16` |
+
+Both simulator and generic iOS Debug builds completed successfully. The next
+unknown is device runtime memory with `Layers = First 16`, not packaging or
+signing.
+
 ## Current limitations
 
 - This is a fixed seq=4, cache-free layer conversion. It proves operator and
   packaging feasibility, not a full autoregressive runtime.
 - Linux can save MLPackages, but cannot execute or fully validate Apple runtime
   behavior.
-- Only selected packages were copied to the Mac and compiled. The full 48-layer
-  set remains on RunPod.
+- Only the first 16 decoder packages were copied to the Mac and compiled. The
+  full 48-layer set remains on RunPod.
 - Compressed package size is not the same as peak resident memory on iPhone.
   The iPhone test must measure load/predict/release behavior on device.
 - No image/audio path was converted yet. This was text-only.
 
 ## Next step
 
-Build an iOS Core ML harness that loads:
+Run the CPU-only iPhone probe with `Layers = First 16` in this order:
 
-1. Embedding package
-2. One decoder layer package
-3. LM head package
+1. `load-decoder-stack`
+2. `decoder-stack`
+3. `full-stack-sequential`
 
-Then measure load time, prediction time, and peak memory on the actual 8GB
-iPhone. After that, extend the harness to sequentially run multiple layer
-packages while releasing each previous `MLModel`.
+If all three pass without memory pressure, copy/compile the next block of
+decoder layers and repeat the same stepwise test.

@@ -1,0 +1,14 @@
+external/llama.cpp/
+models/
+runpod-artifacts/
+logs/*.log
+logs/*.txt
+logs/*.jsonl
+*.gguf
+*.safetensors
+*.mlpackage/
+*.mlmodelc/
+__pycache__/
+.venv/
+*.part
+.DS_Store

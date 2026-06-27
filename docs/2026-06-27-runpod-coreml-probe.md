@@ -307,6 +307,25 @@ The app now exposes `First 40` and `First 44` layer selections in addition to
 4. If `full-stack-sequential` passes, run `load-decoder-stack` and
    `decoder-stack` for `First 48`.
 
+## iPhone CPU-only 48-layer cache-cleaning smoke
+
+Device log supplied from iPhone18,3 on iOS 26.4.2. With RunPod stopped and the
+48-layer bundle installed locally, the full fixed-shape text stack completed on
+device with CPU-only sequential load/predict/release.
+
+| Mode | Result | Peak footprint in log | Notable timing / output |
+| --- | --- | ---: | --- |
+| `full-stack-sequential` | embedding, 48 layers, lm head completed | 192.1 MB | top logit `#253027 1.747` |
+| `load-decoder-stack` | loaded 48 decoder layers | 252.3 MB | completed all 48 layer load/release cycles |
+| `decoder-stack` | decoded `[1,4,3840]` through 48 layers | 251.8 MB | completed all 48 decoder predictions |
+
+This is the first end-to-end fixed-shape `seq=4` CPU-only proof that all 48
+int4 decoder packages can be streamed on the target iPhone without memory
+pressure termination. The result does not yet cover a real autoregressive token
+loop, tokenizer integration, KV cache, or accelerator scheduling, but the core
+sequential Core ML package strategy is now validated for the full 12B text
+decoder depth.
+
 ## Current limitations
 
 - This is a fixed seq=4, cache-free layer conversion. It proves operator and

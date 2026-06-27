@@ -125,6 +125,30 @@ Runtime smoke on local Mac:
 
 The LM head is a major CPU bottleneck; accelerator-backed execution is essential.
 
+## iPhone CPU-only sequential smoke
+
+Device log supplied from iPhone18,3 on iOS 26.4.2. The first implementation that
+held embedding, decoder, and lm head `MLModel` instances at the same time was
+terminated by iOS with code 9 for excessive memory use. After switching the
+probe to CPU-only sequential load/predict/release modes, all single-layer modes
+completed.
+
+| Mode | Peak footprint in log | Notable timing |
+| --- | ---: | ---: |
+| `load-embedding` | 26.2 MB | initial load 4.4219 sec |
+| `load-decoder` | 185.3 MB | initial load 0.6584 sec |
+| `load-lm-head` | 30.6 MB | initial load 4.0908 sec |
+| `load-all-sequential` | 26.5 MB | cached loads under 0.02 sec each |
+| `embedding-only` | 26.8 MB | predict 0.0109 sec |
+| `decoder-only` | 27.0 MB | predict 0.6092 sec |
+| `lm-head-only` | 31.7 MB | predict 0.6962 sec |
+| `full-sequential` | 31.8 MB | decoder 0.5693 sec, lm head 1.2053 sec |
+
+This strongly suggests that the earlier crash was caused by simultaneous model
+retention and/or accelerator/debugger runtime overhead rather than by the
+single-layer CPU path itself. The next useful probe is multiple decoder layer
+packages discovered and executed one at a time.
+
 ## Current limitations
 
 - This is a fixed seq=4, cache-free layer conversion. It proves operator and

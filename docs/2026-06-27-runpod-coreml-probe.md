@@ -318,13 +318,20 @@ device with CPU-only sequential load/predict/release.
 | `full-stack-sequential` | embedding, 48 layers, lm head completed | 192.1 MB | top logit `#253027 1.747` |
 | `load-decoder-stack` | loaded 48 decoder layers | 252.3 MB | completed all 48 layer load/release cycles |
 | `decoder-stack` | decoded `[1,4,3840]` through 48 layers | 251.8 MB | completed all 48 decoder predictions |
+| `generate-one-token` | prompt IDs `2,123,4567,106`, 48 layers, last-token lm head, argmax completed | 252.1 MB | next token `#253027 1.747`; timed steps about 66.2 sec |
 
 This is the first end-to-end fixed-shape `seq=4` CPU-only proof that all 48
 int4 decoder packages can be streamed on the target iPhone without memory
 pressure termination. The result does not yet cover a real autoregressive token
-loop, tokenizer integration, KV cache, or accelerator scheduling, but the core
-sequential Core ML package strategy is now validated for the full 12B text
-decoder depth.
+loop, tokenizer integration, KV cache, or accelerator scheduling, but the
+one-token argmax path confirms that the fixed-shape stack can produce an output
+token on device.
+
+The `generate-one-token` timing is dominated by package load/release overhead:
+about 63.7 sec of timed steps were model loads, about 0.9 sec was cache
+cleanup, and the 48 decoder predictions themselves totaled about 1.4 sec.
+That makes the next optimization target package residency/caching strategy
+rather than decoder matmul time.
 
 ## Current limitations
 
@@ -337,18 +344,18 @@ decoder depth.
 - Compressed package size is not the same as peak resident memory on iPhone.
   The iPhone test must measure load/predict/release behavior on device.
 - The app still uses fixed-shape input IDs. There is no on-device tokenizer,
-  real prompt formatting, autoregressive token loop, KV cache, or accelerator
-  scheduling yet.
+  real prompt formatting, repeated autoregressive token loop, KV cache, or
+  accelerator scheduling yet.
 - No image/audio path was converted yet. This remains text-only.
 
 ## Next step
 
-Add a tokenizer-ready one-token generation probe on top of the validated
-sequential runner:
+Move from the validated fixed-ID one-token probe toward a minimally usable text
+loop:
 
-1. Accept a fixed 4-token prompt ID window from `COREML_PROBE_INPUT_IDS` or
-   `--input-ids=`.
-2. Run embedding, all 48 decoder layers, last-token LM head, and argmax.
-3. Log `Next token` separately from `Top logits`.
-4. Once this is stable, add a tiny tokenizer/prompt-format layer and then move
-   toward a repeated one-token loop with an explicit cache strategy.
+1. Add a tiny tokenizer/prompt-format layer or a host-side helper that feeds
+   known-good token IDs.
+2. Implement a repeated one-token loop for a very short fixed window.
+3. Decide whether to keep packages hot for multiple tokens, use grouped layer
+   residency, or continue strict load/predict/release for memory headroom.
+4. Re-test CPU-only first, then evaluate accelerator scheduling separately.

@@ -38,30 +38,35 @@ Use this when continuing in a fresh Codex chat.
   - `full-stack-sequential`: peak `192.1 MB`, top logit `#253027 1.747`
   - `load-decoder-stack`: peak `252.3 MB`
   - `decoder-stack`: peak `251.8 MB`
+  - `generate-one-token`: peak `252.1 MB`, next token `#253027 1.747`,
+    timed steps about `66.2 sec`
+- In `generate-one-token`, most time is model load/release overhead:
+  about `63.7 sec` of timed steps were package loads, while all 48 decoder
+  predictions totaled about `1.4 sec`.
 - Earlier 24-layer crash was traced to Core ML/E5RT runtime cache pressure. The
   app now clears `com.apple.e5rt.e5bundlecache` at run start and after each model
   release.
 
-## Current code direction
+## Current state
 
-The next recommended step is a tokenizer-ready one-token probe before real
-tokenizer/KV work.
-
-Current intended behavior:
-
-- Add or use `generate-one-token`.
+- `generate-one-token` is implemented and has passed on iPhone CPU-only with
+  `Layers = First 48`.
 - Keep the fixed 4-token shape.
 - Accept prompt IDs via `COREML_PROBE_INPUT_IDS` or `--input-ids=`.
 - Run embedding -> selected decoder layers -> last-token LM head -> argmax.
 - Log `Prompt IDs` and `Next token`.
+- A simple app icon exists in `Assets.xcassets/AppIcon.appiconset`.
 
-After this passes on simulator/generic iOS build, ask the user to test on device:
+## Recommended next step
 
-1. Install the new build.
-2. `Compute = CPU`.
-3. `Layers = First 48`.
-4. `Mode = Generate one token`.
-5. Optional custom launch arg: `--input-ids=2,123,4567,106`.
+Move toward a minimally usable text loop:
+
+1. Add tokenizer/prompt formatting or a host-side helper that feeds known token
+   IDs.
+2. Implement a repeated one-token loop for a very short fixed window.
+3. Decide whether to keep model packages hot, group layer residency, or keep the
+   strict load/predict/release path for memory headroom.
+4. Re-test CPU-only first before accelerator experiments.
 
 ## Useful commands
 

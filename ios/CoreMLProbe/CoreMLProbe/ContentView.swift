@@ -9,6 +9,11 @@ struct ContentView: View {
         NavigationStack {
             List {
                 Section {
+                    Picker("Mode", selection: $viewModel.runMode) {
+                        ForEach(ProbeRunMode.allCases) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
                     Picker("Compute", selection: $viewModel.computeSelection) {
                         ForEach(ProbeComputeSelection.allCases) { selection in
                             Text(selection.title).tag(selection)
@@ -69,7 +74,8 @@ struct ContentView: View {
 
 @MainActor
 final class ProbeViewModel: ObservableObject {
-    @Published var computeSelection: ProbeComputeSelection = .all
+    @Published var runMode = ProbeRunMode.selectedFromProcess(default: .loadEmbedding)
+    @Published var computeSelection = ProbeComputeSelection.selectedFromProcess(default: .cpuOnly)
     @Published var isRunning = false
     @Published var steps: [ProbeStep] = []
     @Published var summary = "Idle"
@@ -96,9 +102,10 @@ final class ProbeViewModel: ObservableObject {
         currentMemoryText = ProbeMemory.currentText()
 
         let computeSelection = computeSelection
+        let runMode = runMode
         Task {
             let result = await Task.detached(priority: .userInitiated) {
-                ProbeRunner.run(computeSelection: computeSelection)
+                ProbeRunner.run(computeSelection: computeSelection, mode: runMode)
             }.value
 
             switch result {

@@ -61,9 +61,31 @@ The simulator app can auto-run the probe and print `[CoreMLProbe]` lines:
 xcrun simctl launch --console booted lab.lube8163.CoreMLProbe --autorun
 ```
 
+For iPhone memory triage, start with CPU-only single-model loads before trying
+the full pipeline. Useful scheme arguments or launch environment values:
+
+```bash
+--autorun --mode=load-embedding
+--autorun --mode=load-decoder
+--autorun --mode=load-lm-head
+--autorun --mode=load-all-sequential
+--autorun --mode=full-sequential
+```
+
+```bash
+COREML_PROBE_MODE=load-lm-head
+COREML_PROBE_COMPUTE=cpuOnly
+```
+
+The app defaults to `load-embedding` and `cpuOnly` to avoid loading multiple
+large bundles on the first run. Try `full-sequential` only after the individual
+loads and synthetic predictions pass.
+
 For an actual iPhone, open `ios/CoreMLProbe/CoreMLProbe.xcodeproj` in Xcode,
 select a signing team, choose the device, and run the `CoreMLProbe` scheme.
 The copied `.mlmodelc` bundles remain ignored by git.
+When measuring near the memory limit, disable View Debugging and other optional
+scheme diagnostics so Xcode does not inject extra debugging libraries.
 
 ## License
 

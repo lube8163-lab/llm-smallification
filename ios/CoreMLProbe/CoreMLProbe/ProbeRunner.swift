@@ -27,6 +27,56 @@ enum ProbeComputeSelection: String, CaseIterable, Identifiable {
         case .cpuAndNeuralEngine: .cpuAndNeuralEngine
         }
     }
+
+    static func selectedFromProcess(default fallback: ProbeComputeSelection) -> ProbeComputeSelection {
+        let environment = ProcessInfo.processInfo.environment
+        if let value = environment["COREML_PROBE_COMPUTE"], let selection = ProbeComputeSelection(rawValue: value) {
+            return selection
+        }
+        return fallback
+    }
+}
+
+enum ProbeRunMode: String, CaseIterable, Identifiable {
+    case loadEmbedding = "load-embedding"
+    case loadDecoder = "load-decoder"
+    case loadLMHead = "load-lm-head"
+    case loadAllSequential = "load-all-sequential"
+    case embeddingOnly = "embedding-only"
+    case decoderOnly = "decoder-only"
+    case lmHeadOnly = "lm-head-only"
+    case fullSequential = "full-sequential"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .loadEmbedding: "Load embedding"
+        case .loadDecoder: "Load layer 0"
+        case .loadLMHead: "Load LM head"
+        case .loadAllSequential: "Load all sequential"
+        case .embeddingOnly: "Embedding predict"
+        case .decoderOnly: "Layer 0 synthetic"
+        case .lmHeadOnly: "LM head synthetic"
+        case .fullSequential: "Full sequential"
+        }
+    }
+
+    static func selectedFromProcess(default fallback: ProbeRunMode) -> ProbeRunMode {
+        let environment = ProcessInfo.processInfo.environment
+        if let value = environment["COREML_PROBE_MODE"], let mode = ProbeRunMode(rawValue: value) {
+            return mode
+        }
+
+        let prefix = "--mode="
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) }) {
+            let value = String(argument.dropFirst(prefix.count))
+            if let mode = ProbeRunMode(rawValue: value) {
+                return mode
+            }
+        }
+        return fallback
+    }
 }
 
 struct ProbeStep: Identifiable {
@@ -81,29 +131,85 @@ enum ProbeRunner {
     private static let decoderName = "gemma4_12b_layer0_decoder_seq4_mask_int4_block32"
     private static let lmHeadName = "gemma4_12b_lm_head_1tok_int4_block32"
 
-    static func run(computeSelection: ProbeComputeSelection) -> Result<ProbeReport, ProbeFailure> {
+    static func run(computeSelection: ProbeComputeSelection, mode: ProbeRunMode) -> Result<ProbeReport, ProbeFailure> {
         var steps: [ProbeStep] = []
 
-        func record(_ name: String, seconds: Double? = nil, detail: String = "") {
-            appendStep(ProbeStep(name: name, seconds: seconds, memoryMB: ProbeMemory.currentMB(), detail: detail), to: &steps)
-        }
-
         do {
-            print("[CoreMLProbe] run started compute=\(computeSelection.title)")
-            record("Start", detail: computeSelection.title)
+            print("[CoreMLProbe] run started compute=\(computeSelection.title) mode=\(mode.rawValue)")
+            recordStep("Start", detail: "\(computeSelection.title), \(mode.title)", steps: &steps)
 
             let config = MLModelConfiguration()
             config.computeUnits = computeSelection.units
 
+            let summary: String
+            switch mode {
+            case .loadEmbedding:
+                try runLoadOnly(named: embeddingName, config: config, steps: &steps)
+                summary = "OK: loaded embedding"
+            case .loadDecoder:
+                try runLoadOnly(named: decoderName, config: config, steps: &steps)
+                summary = "OK: loaded layer 0"
+            case .loadLMHead:
+                try runLoadOnly(named: lmHeadName, config: config, steps: &steps)
+                summary = "OK: loaded LM head"
+            case .loadAllSequential:
+                try runLoadOnly(named: embeddingName, config: config, steps: &steps)
+                try runLoadOnly(named: decoderName, config: config, steps: &steps)
+                try runLoadOnly(named: lmHeadName, config: config, steps: &steps)
+                summary = "OK: loaded all sequentially"
+            case .embeddingOnly:
+                let hidden = try runEmbedding(config: config, steps: &steps)
+                summary = "OK: hidden \(hidden.shape)"
+            case .decoderOnly:
+                let hidden = try makeHidden(seqLength: 4)
+                let decoded = try runDecoder(hidden: hidden, config: config, steps: &steps)
+                summary = "OK: decoded \(decoded.shape)"
+            case .lmHeadOnly:
+                let logits = try runLMHead(hidden: try makeLastHidden(), config: config, steps: &steps)
+                let top = topLogitSummary(logits)
+                recordStep("Top logits", detail: top, steps: &steps)
+                summary = "OK: \(top)"
+            case .fullSequential:
+                let hidden = try runEmbedding(config: config, steps: &steps)
+                let decoded = try runDecoder(hidden: hidden, config: config, steps: &steps)
+                let lastHidden = try copyLastToken(from: decoded)
+                let logits = try runLMHead(hidden: lastHidden, config: config, steps: &steps)
+                let top = topLogitSummary(logits)
+                recordStep("Top logits", detail: top, steps: &steps)
+                summary = "OK: \(top)"
+            }
+
+            print("[CoreMLProbe] run finished \(summary)")
+            return .success(ProbeReport(steps: steps, summary: summary))
+        } catch {
+            recordStep("Error", detail: String(describing: error), steps: &steps)
+            print("[CoreMLProbe] run failed: \(String(describing: error))")
+            return .failure(ProbeFailure(steps: steps, message: String(describing: error)))
+        }
+    }
+
+    private static func recordStep(_ name: String, seconds: Double? = nil, detail: String = "", steps: inout [ProbeStep]) {
+        appendStep(ProbeStep(name: name, seconds: seconds, memoryMB: ProbeMemory.currentMB(), detail: detail), to: &steps)
+    }
+
+    private static func appendStep(_ step: ProbeStep, to steps: inout [ProbeStep]) {
+        steps.append(step)
+        print("[CoreMLProbe] \(step.name) duration=\(step.durationText) memory=\(step.memoryText) detail=\(step.detail)")
+    }
+
+    private static func runLoadOnly(named name: String, config: MLModelConfiguration, steps: inout [ProbeStep]) throws {
+        try autoreleasepool {
+            _ = try loadModel(named: name, config: config, steps: &steps)
+            recordStep("Loaded \(name)", detail: "leaving autorelease scope", steps: &steps)
+        }
+        recordStep("Released \(name)", detail: "ARC scope exited", steps: &steps)
+    }
+
+    private static func runEmbedding(config: MLModelConfiguration, steps: inout [ProbeStep]) throws -> MLMultiArray {
+        let hidden = try autoreleasepool {
             let embedding = try loadModel(named: embeddingName, config: config, steps: &steps)
-            let decoder = try loadModel(named: decoderName, config: config, steps: &steps)
-            let lmHead = try loadModel(named: lmHeadName, config: config, steps: &steps)
-
             let inputIDs = try makeInputIDs()
-            let positionIDs = try makePositionIDs()
-            let mask = try makeCausalMask()
-
-            let embeddingOutput = try timedPrediction(
+            let output = try timedPrediction(
                 name: "Embedding",
                 model: embedding,
                 provider: MLDictionaryFeatureProvider(dictionary: [
@@ -111,9 +217,18 @@ enum ProbeRunner {
                 ]),
                 steps: &steps
             )
-            let hidden = try requireArray(named: "hidden", output: embeddingOutput)
+            return try requireArray(named: "hidden", output: output)
+        }
+        recordStep("Released \(embeddingName)", detail: "hidden retained", steps: &steps)
+        return hidden
+    }
 
-            let decoderOutput = try timedPrediction(
+    private static func runDecoder(hidden: MLMultiArray, config: MLModelConfiguration, steps: inout [ProbeStep]) throws -> MLMultiArray {
+        let decoded = try autoreleasepool {
+            let decoder = try loadModel(named: decoderName, config: config, steps: &steps)
+            let positionIDs = try makePositionIDs()
+            let mask = try makeCausalMask()
+            let output = try timedPrediction(
                 name: "Decoder layer 0",
                 model: decoder,
                 provider: MLDictionaryFeatureProvider(dictionary: [
@@ -123,33 +238,27 @@ enum ProbeRunner {
                 ]),
                 steps: &steps
             )
-            let decoded = try requireArray(named: "y", output: decoderOutput)
-            let lastHidden = try copyLastToken(from: decoded)
+            return try requireArray(named: "y", output: output)
+        }
+        recordStep("Released \(decoderName)", detail: "decoded retained", steps: &steps)
+        return decoded
+    }
 
-            let headOutput = try timedPrediction(
+    private static func runLMHead(hidden: MLMultiArray, config: MLModelConfiguration, steps: inout [ProbeStep]) throws -> MLMultiArray {
+        let logits = try autoreleasepool {
+            let lmHead = try loadModel(named: lmHeadName, config: config, steps: &steps)
+            let output = try timedPrediction(
                 name: "LM head",
                 model: lmHead,
                 provider: MLDictionaryFeatureProvider(dictionary: [
-                    "hidden": MLFeatureValue(multiArray: lastHidden)
+                    "hidden": MLFeatureValue(multiArray: hidden)
                 ]),
                 steps: &steps
             )
-            let logits = try requireArray(named: "logits", output: headOutput)
-            let top = topLogitSummary(logits)
-            record("Top logits", detail: top)
-            print("[CoreMLProbe] run finished OK: \(top)")
-
-            return .success(ProbeReport(steps: steps, summary: "OK: \(top)"))
-        } catch {
-            record("Error", detail: String(describing: error))
-            print("[CoreMLProbe] run failed: \(String(describing: error))")
-            return .failure(ProbeFailure(steps: steps, message: String(describing: error)))
+            return try requireArray(named: "logits", output: output)
         }
-    }
-
-    private static func appendStep(_ step: ProbeStep, to steps: inout [ProbeStep]) {
-        steps.append(step)
-        print("[CoreMLProbe] \(step.name) duration=\(step.durationText) memory=\(step.memoryText) detail=\(step.detail)")
+        recordStep("Released \(lmHeadName)", detail: "logits retained", steps: &steps)
+        return logits
     }
 
     private static func loadModel(named name: String, config: MLModelConfiguration, steps: inout [ProbeStep]) throws -> MLModel {
@@ -188,6 +297,24 @@ enum ProbeRunner {
     private static func requireArray(named name: String, output: MLFeatureProvider) throws -> MLMultiArray {
         guard let array = output.featureValue(for: name)?.multiArrayValue else {
             throw ProbeError.missingOutput(name)
+        }
+        return array
+    }
+
+    private static func makeHidden(seqLength: Int) throws -> MLMultiArray {
+        let array = try MLMultiArray(shape: [1, NSNumber(value: seqLength), 3840], dataType: .float16)
+        let pointer = array.dataPointer.bindMemory(to: Float16.self, capacity: array.count)
+        for index in 0..<array.count {
+            pointer[index] = 0
+        }
+        return array
+    }
+
+    private static func makeLastHidden() throws -> MLMultiArray {
+        let array = try MLMultiArray(shape: [1, 1, 3840], dataType: .float16)
+        let pointer = array.dataPointer.bindMemory(to: Float16.self, capacity: array.count)
+        for index in 0..<array.count {
+            pointer[index] = 0
         }
         return array
     }

@@ -11,5 +11,10 @@
 __pycache__/
 .venv/
 .derived-data/
+*.xcodeproj/project.xcworkspace/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+project.xcworkspace/
+xcuserdata/
 *.part
 .DS_Store

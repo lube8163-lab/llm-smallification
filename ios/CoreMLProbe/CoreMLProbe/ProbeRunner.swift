@@ -241,6 +241,7 @@ enum ProbeRunner {
         do {
             print("[CoreMLProbe] run started compute=\(computeSelection.title) mode=\(mode.rawValue) layers=\(layerSelection.rawValue)")
             recordStep("Start", detail: "\(computeSelection.title), \(mode.title), \(layerSelection.title)", steps: &steps)
+            clearCoreMLRuntimeCache(reason: "run start", steps: &steps)
 
             let config = MLModelConfiguration()
             config.computeUnits = computeSelection.units
@@ -325,6 +326,7 @@ enum ProbeRunner {
             print("[CoreMLProbe] run finished \(summary)")
             return .success(ProbeReport(steps: steps, summary: summary))
         } catch {
+            clearCoreMLRuntimeCache(reason: "error cleanup", steps: &steps)
             recordStep("Error", detail: String(describing: error), steps: &steps)
             print("[CoreMLProbe] run failed: \(String(describing: error))")
             return .failure(ProbeFailure(steps: steps, message: String(describing: error)))
@@ -346,6 +348,7 @@ enum ProbeRunner {
             recordStep("Loaded \(name)", detail: "leaving autorelease scope", steps: &steps)
         }
         recordStep("Released \(name)", detail: "ARC scope exited", steps: &steps)
+        clearCoreMLRuntimeCache(reason: "released \(name)", steps: &steps)
     }
 
     private static func runEmbedding(config: MLModelConfiguration, steps: inout [ProbeStep]) throws -> MLMultiArray {
@@ -363,6 +366,7 @@ enum ProbeRunner {
             return try requireArray(named: "hidden", output: output)
         }
         recordStep("Released \(embeddingName)", detail: "hidden retained", steps: &steps)
+        clearCoreMLRuntimeCache(reason: "released \(embeddingName)", steps: &steps)
         return hidden
     }
 
@@ -405,6 +409,7 @@ enum ProbeRunner {
             return try requireArray(named: "y", output: output)
         }
         recordStep("Released \(layer.name)", detail: "decoded retained", steps: &steps)
+        clearCoreMLRuntimeCache(reason: "released \(layer.name)", steps: &steps)
         return decoded
     }
 
@@ -466,7 +471,79 @@ enum ProbeRunner {
             return try requireArray(named: "logits", output: output)
         }
         recordStep("Released \(lmHeadName)", detail: "logits retained", steps: &steps)
+        clearCoreMLRuntimeCache(reason: "released \(lmHeadName)", steps: &steps)
         return logits
+    }
+
+    private static func clearCoreMLRuntimeCache(reason: String, steps: inout [ProbeStep]) {
+        let fileManager = FileManager.default
+        let start = Date()
+        let targets = coreMLRuntimeCacheTargets(fileManager: fileManager)
+        var removed: [String] = []
+        var failures: [String] = []
+
+        for target in targets {
+            guard fileManager.fileExists(atPath: target.path) else {
+                continue
+            }
+
+            do {
+                try fileManager.removeItem(at: target)
+                removed.append(cacheTargetLabel(target))
+            } catch {
+                failures.append("\(cacheTargetLabel(target)): \(error.localizedDescription)")
+            }
+        }
+
+        guard !removed.isEmpty || !failures.isEmpty else {
+            return
+        }
+
+        let detailParts = [
+            "reason=\(reason)",
+            "removed=\(removed.isEmpty ? "none" : removed.joined(separator: ","))",
+            failures.isEmpty ? nil : "failed=\(failures.joined(separator: ","))"
+        ].compactMap { $0 }
+
+        appendStep(ProbeStep(
+            name: "Clear Core ML cache",
+            seconds: Date().timeIntervalSince(start),
+            memoryMB: ProbeMemory.currentMB(),
+            detail: detailParts.joined(separator: " ")
+        ), to: &steps)
+    }
+
+    private static func coreMLRuntimeCacheTargets(fileManager: FileManager) -> [URL] {
+        guard let cachesDirectory = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first else {
+            return []
+        }
+
+        let bundleID = Bundle.main.bundleIdentifier ?? "lab.lube8163.CoreMLProbe"
+        var targets = [
+            cachesDirectory
+                .appendingPathComponent(bundleID, isDirectory: true)
+                .appendingPathComponent("com.apple.e5rt.e5bundlecache", isDirectory: true),
+            cachesDirectory
+                .appendingPathComponent("com.apple.e5rt.e5bundlecache", isDirectory: true)
+        ]
+
+        if let children = try? fileManager.contentsOfDirectory(
+            at: cachesDirectory,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for child in children where child.lastPathComponent == bundleID {
+                targets.append(child.appendingPathComponent("com.apple.e5rt.e5bundlecache", isDirectory: true))
+            }
+        }
+
+        var seen: Set<String> = []
+        return targets.filter { seen.insert($0.path).inserted }
+    }
+
+    private static func cacheTargetLabel(_ url: URL) -> String {
+        let parent = url.deletingLastPathComponent().lastPathComponent
+        return "\(parent)/\(url.lastPathComponent)"
     }
 
     private static func loadModel(named name: String, config: MLModelConfiguration, steps: inout [ProbeStep]) throws -> MLModel {

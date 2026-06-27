@@ -224,6 +224,25 @@ Both simulator and generic iOS Debug builds completed successfully for this
 32-layer bundle. The next risk is install time/space and device runtime
 behavior, not local packaging.
 
+## iPhone CPU-only 24-layer cache failure
+
+Device log supplied from iPhone18,3 on iOS 26.4.2. With the 32-layer app
+installed, the `First 24` run did not fail at the first decoder load boundary:
+
+| Mode | Result | Peak footprint in log | Notable detail |
+| --- | --- | ---: | --- |
+| `load-decoder-stack` | loaded 24 decoder layers | 890.8 MB | E5RT reported `No space left on device` while compiling BNNS around layer 21 |
+| `decoder-stack` | decoded `[1,4,3840]` | 190.3 MB | completed all 24 decoder predictions |
+| `full-stack-sequential` | failed at startup | 30.8 MB before failure | E5RT failed to preallocate `com.apple.e5rt.e5bundlecache/.../bnns_program.bnnsir` |
+
+The sharp jump near layer 21 appears to be Core ML/E5RT compile-cache pressure,
+not ordinary retained `MLModel` memory. The app now clears
+`com.apple.e5rt.e5bundlecache` at run start and after each model release, then
+logs `Clear Core ML cache` when it removes stale runtime cache data. This makes
+the probe slower, but it better matches the staged streaming experiment because
+old compiled BNNS bundles should not accumulate while measuring sequential
+load/predict/release behavior.
+
 ## Current limitations
 
 - This is a fixed seq=4, cache-free layer conversion. It proves operator and
@@ -238,12 +257,16 @@ behavior, not local packaging.
 
 ## Next step
 
-Run the CPU-only iPhone probe with `Layers = First 24` first, then repeat with
-`Layers = First 32` only if 24 layers pass:
+Install the cache-cleaning build and rerun the CPU-only iPhone probe with
+`Layers = First 24`. Start with:
+
+1. `full-stack-sequential`
+
+If that still fails, capture the first `No space left on device` or memory
+pressure point. If it passes, repeat with:
 
 1. `load-decoder-stack`
 2. `decoder-stack`
 3. `full-stack-sequential`
 
-If all three pass without memory pressure, copy/compile the next block of
-decoder layers and repeat the same stepwise test.
+Then move to `Layers = First 32` only after 24 layers pass cleanly.

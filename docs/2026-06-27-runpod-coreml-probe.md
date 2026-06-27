@@ -190,13 +190,47 @@ Both simulator and generic iOS Debug builds completed successfully. The next
 unknown is device runtime memory with `Layers = First 16`, not packaging or
 signing.
 
+## iPhone CPU-only 16-layer stack smoke
+
+Device log supplied from iPhone18,3 on iOS 26.4.2. The 16-layer CPU-only
+stack probes completed with no memory-pressure termination.
+
+| Mode | Result | Peak footprint in log | Notable timing |
+| --- | --- | ---: | ---: |
+| `load-decoder-stack` | loaded 16 decoder layers | 206.7 MB | layer loads ranged roughly 0.79-7.66 sec |
+| `decoder-stack` | decoded `[1,4,3840]` | 30.7 MB | most layer predictions were about 0.46-1.03 sec |
+| `full-stack-sequential` | embedding, 16 layers, lm head completed | 34.3 MB | lm head predict 10.5347 sec |
+
+The runtime footprint still stayed essentially flat during sequential decoder
+execution. The largest observed resident footprint was in the explicit load
+probe, not the full sequential path. This supports continuing the same staged
+test plan at higher layer counts.
+
+## 32-layer staging for next iPhone smoke
+
+While the RunPod instance was still active, decoder layers 16-31 were copied to
+the Mac and compiled. The iOS probe now contains embedding, LM head, and the
+first 32 decoder layers, so the UI can test both `First 24` and `First 32`
+without another app rebuild.
+
+| Artifact | Size / count |
+| --- | ---: |
+| `ios/CoreMLProbe/CoreMLProbe/Models` | about `4.9G` |
+| `Debug-iphonesimulator/CoreMLProbe.app` | about `4.9G` |
+| `Debug-iphoneos/CoreMLProbe.app` | about `4.9G` |
+| Decoder `.mlmodelc` bundles in app | `32` |
+
+Both simulator and generic iOS Debug builds completed successfully for this
+32-layer bundle. The next risk is install time/space and device runtime
+behavior, not local packaging.
+
 ## Current limitations
 
 - This is a fixed seq=4, cache-free layer conversion. It proves operator and
   packaging feasibility, not a full autoregressive runtime.
 - Linux can save MLPackages, but cannot execute or fully validate Apple runtime
   behavior.
-- Only the first 16 decoder packages were copied to the Mac and compiled. The
+- Only the first 32 decoder packages were copied to the Mac and compiled. The
   full 48-layer set remains on RunPod.
 - Compressed package size is not the same as peak resident memory on iPhone.
   The iPhone test must measure load/predict/release behavior on device.
@@ -204,7 +238,8 @@ signing.
 
 ## Next step
 
-Run the CPU-only iPhone probe with `Layers = First 16` in this order:
+Run the CPU-only iPhone probe with `Layers = First 24` first, then repeat with
+`Layers = First 32` only if 24 layers pass:
 
 1. `load-decoder-stack`
 2. `decoder-stack`

@@ -166,6 +166,18 @@ to the raw prompt tokens because a full chat template often leaves only the
 assistant-prefix tokens in the 4-token window; pass `--chat-template` only when
 you explicitly want to inspect that template form.
 
+After a device run, save the Xcode console output and check the endpoint and
+generation summary:
+
+```bash
+./scripts/analyze_coreml_probe_log.py coremlprobe.log \
+  --require-norm-lm-head \
+  --fail-on-repeat \
+  --expect-layers 48 \
+  --min-generated-tokens 8 \
+  --max-peak-mb 350
+```
+
 For an actual iPhone, open `ios/CoreMLProbe/CoreMLProbe.xcodeproj` in Xcode,
 select a signing team, choose the device, and run the `CoreMLProbe` scheme.
 The copied `.mlmodelc` bundles remain ignored by git.

@@ -32,6 +32,7 @@ Use this prompt to continue in a fresh Codex chat.
   `--target norm-lm-head` を実行して新endpoint `.mlpackage` を作ります。
 - `scripts/gemma4_token_helper.py` でホスト側 tokenizer による prompt -> last4 IDs と decode ができます。
   依存は `transformers sentencepiece jinja2` です。固定4token検証ではchat templateの末尾がassistant prefixに寄りやすいため、helperの既定はraw prompt tokenizationです。
+- `scripts/analyze_coreml_probe_log.py` でXcodeログを解析できます。新endpoint必須、fallback禁止、同一token検出、layer数、生成token数、peak memory上限をチェックできます。
 - Chat本文はまだオンデバイスtokenizerを通っていません。本文に
   `input_ids_last4=...` / `input_ids=...` / `#123 #456 #789 #10` /
   素の4IDを貼った場合だけ、それをモデル入力として採用します。普通の
@@ -89,6 +90,7 @@ Use this prompt to continue in a fresh Codex chat.
 4. 生成物または `/workspace/gemma12b/gemma4-norm-lm-head-endpoint.tar.gz` をMacへコピーしてください。
 5. Mac側で `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>` を実行してください。`.tar.gz` をそのまま渡せます。これでcompile、endpoint-only copy、strict verify、generic iOS buildまで一括で走ります。
 6. 実機では endpoint `CPU`, decoder `CPU+GPU`, `Layers = First 48`, `Cache = Run end` のまま、ログに `LM head target` と `Load gemma4_12b_norm_lm_head_1tok_int4_block32` が出て `LM head fallback` が出ないことを確認してください。
-7. token window は `python3 scripts/gemma4_token_helper.py --prompt "..."` の `input_ids_last4` をChat本文または `Token window` 欄に貼って、まず `Tokens = 8`、安定すれば `16` を試してください。生成 ID の確認は `--decode-ids` です。
-8. 意図した差分だけcommit/pushしてください。大きなモデルやXcode署名差分を不用意にstageしないでください。
+7. Xcodeログを保存して `./scripts/analyze_coreml_probe_log.py <log> --require-norm-lm-head --fail-on-repeat --expect-layers 48 --min-generated-tokens 8 --max-peak-mb 350` を実行してください。
+8. token window は `python3 scripts/gemma4_token_helper.py --prompt "..."` の `input_ids_last4` をChat本文または `Token window` 欄に貼って、まず `Tokens = 8`、安定すれば `16` を試してください。生成 ID の確認は `--decode-ids` です。
+9. 意図した差分だけcommit/pushしてください。大きなモデルやXcode署名差分を不用意にstageしないでください。
 ```

@@ -26,7 +26,8 @@ Use this prompt to continue in a fresh Codex chat.
 - アプリは `gemma4_12b_norm_lm_head_1tok_int4_block32.mlmodelc` を優先して読みます。
   これは final RMSNorm + tied lm_head + final logit softcap を含む新endpointです。
   未配置なら旧 `gemma4_12b_lm_head_1tok_int4_block32.mlmodelc` にfallbackし、
-  ログに `LM head fallback` を出します。
+  ログに `LM head fallback` を出します。新endpointを読めた場合は `LM head target`
+  が出ます。
 - `scripts/runpod_convert_gemma4_coreml_endpoints.py` を追加済みです。RunPod側で
   `--target norm-lm-head` を実行して新endpoint `.mlpackage` を作ります。
 - `scripts/gemma4_token_helper.py` でホスト側 tokenizer による prompt -> last4 IDs と decode ができます。
@@ -86,8 +87,8 @@ Use this prompt to continue in a fresh Codex chat.
 2. `docs/handoff-current.md` と `docs/2026-06-27-runpod-coreml-probe.md` を読んでください。
 3. RunPod側で `./scripts/runpod_refresh_gemma4_coreml_endpoint.sh` を実行し、新しい `gemma4_12b_norm_lm_head_1tok_int4_block32.mlpackage` と転送用tarballを作ってください。
 4. 生成物または `/workspace/gemma12b/gemma4-norm-lm-head-endpoint.tar.gz` をMacへコピーしてください。
-5. Mac側で `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-or-dir>` を実行してください。これでcompile、endpoint-only copy、strict verify、generic iOS buildまで一括で走ります。
-6. 実機では endpoint `CPU`, decoder `CPU+GPU`, `Layers = First 48`, `Cache = Run end` のまま、ログに `Load gemma4_12b_norm_lm_head_1tok_int4_block32` が出て `LM head fallback` が出ないことを確認してください。
+5. Mac側で `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>` を実行してください。`.tar.gz` をそのまま渡せます。これでcompile、endpoint-only copy、strict verify、generic iOS buildまで一括で走ります。
+6. 実機では endpoint `CPU`, decoder `CPU+GPU`, `Layers = First 48`, `Cache = Run end` のまま、ログに `LM head target` と `Load gemma4_12b_norm_lm_head_1tok_int4_block32` が出て `LM head fallback` が出ないことを確認してください。
 7. token window は `python3 scripts/gemma4_token_helper.py --prompt "..."` の `input_ids_last4` をChat本文または `Token window` 欄に貼って、まず `Tokens = 8`、安定すれば `16` を試してください。生成 ID の確認は `--decode-ids` です。
 8. 意図した差分だけcommit/pushしてください。大きなモデルやXcode署名差分を不用意にstageしないでください。
 ```

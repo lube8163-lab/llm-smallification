@@ -1065,15 +1065,21 @@ enum ProbeRunner {
     }
 
     private static func loadLMHead(config: MLModelConfiguration, steps: inout [ProbeStep]) throws -> LoadedProbeModel {
-        for (index, name) in lmHeadNames.enumerated() {
+        for name in lmHeadNames {
             guard let url = modelURL(named: name) else {
                 continue
             }
 
-            if index > 0 {
+            if name == lmHeadName {
+                recordStep(
+                    "LM head target",
+                    detail: "using preferred norm+lm_head endpoint with final norm/softcap",
+                    steps: &steps
+                )
+            } else {
                 recordStep(
                     "LM head fallback",
-                    detail: "missing \(lmHeadName); using \(name) without final norm/softcap",
+                    detail: "missing \(lmHeadName); using legacy \(name) without final norm/softcap",
                     steps: &steps
                 )
             }

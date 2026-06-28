@@ -102,7 +102,8 @@ Use this when continuing in a fresh Codex chat.
   for LM head inference. This package should include language-model final
   RMSNorm, tied lm_head, and Gemma final logit softcap. If it is absent, the app
   falls back to the older linear-only `gemma4_12b_lm_head_1tok_int4_block32`
-  and logs `LM head fallback`.
+  and logs `LM head fallback`; with the preferred endpoint present it logs
+  `LM head target`.
 - `scripts/runpod_convert_gemma4_coreml_endpoints.py` converts the fixed-shape
   embedding package and the corrected norm+lm_head endpoint package on RunPod.
   After compiling the `.mlpackage` outputs locally, `prepare_ios_coreml_probe_assets.sh`
@@ -121,7 +122,7 @@ Use this when continuing in a fresh Codex chat.
 - `scripts/verify_coreml_probe_assets.py` checks the staged iOS model bundles.
   Use `--allow-legacy-lm-head` for the current known legacy state, and use
   `--require-norm-lm-head --fail-on-legacy` after the endpoint refresh.
-- `scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-or-dir>` runs the
+- `scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>` runs the
   local endpoint refresh flow: compile the norm+lm_head package, copy only
   endpoint bundles, verify strict asset state, then build for generic iOS.
 - `scripts/gemma4_token_helper.py` is a host-side helper for prompt-to-token
@@ -144,7 +145,7 @@ all 48 layers without crashing.
 
 1. Reconnect RunPod or another CUDA host with the Gemma weights and run:
    `./scripts/runpod_refresh_gemma4_coreml_endpoint.sh`.
-   Then run `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-or-dir>`
+   Then run `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>`
    on the Mac to compile, copy, verify, and build.
 2. Verify the device log loads
    `gemma4_12b_norm_lm_head_1tok_int4_block32` with no `LM head fallback`.

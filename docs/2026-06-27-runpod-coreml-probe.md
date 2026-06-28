@@ -188,7 +188,7 @@ and copy only endpoint bundles:
 ```
 
 ```bash
-./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-or-dir>
+./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>
 ```
 
 The wrapper runs the equivalent lower-level steps:

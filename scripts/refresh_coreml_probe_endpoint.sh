@@ -15,6 +15,7 @@ usage() {
 Usage:
   refresh_coreml_probe_endpoint.sh [options] <endpoint-mlpackage-dir> [compiled-output-dir]
   refresh_coreml_probe_endpoint.sh [options] <gemma4_12b_norm_lm_head_1tok_int4_block32.mlpackage> [compiled-output-dir]
+  refresh_coreml_probe_endpoint.sh [options] <gemma4-norm-lm-head-endpoint.tar.gz> [compiled-output-dir]
   refresh_coreml_probe_endpoint.sh --compiled [options] <compiled-endpoint-dir>
   refresh_coreml_probe_endpoint.sh --compiled [options] <gemma4_12b_norm_lm_head_1tok_int4_block32.mlmodelc>
 
@@ -76,18 +77,25 @@ fi
 
 INPUT_DIR="$1"
 COMPILED_DIR="${2:-"$ROOT_DIR/runpod-artifacts/compiled-endpoints"}"
+TMP_DIR=""
+
+cleanup() {
+  if [[ -n "$TMP_DIR" ]]; then
+    rm -rf "$TMP_DIR"
+  fi
+}
+trap cleanup EXIT
 
 if [[ "$COMPILED_MODE" == "1" && $# -gt 1 ]]; then
   echo "--compiled accepts only one input directory" >&2
   exit 2
 fi
 
-if [[ ! -d "$INPUT_DIR" ]]; then
-  echo "missing input directory: $INPUT_DIR" >&2
-  exit 1
-fi
-
 if [[ "$COMPILED_MODE" == "1" ]]; then
+  if [[ ! -d "$INPUT_DIR" ]]; then
+    echo "missing compiled input directory: $INPUT_DIR" >&2
+    exit 1
+  fi
   if [[ "$(basename "$INPUT_DIR")" == "$NORM_COMPILED" ]]; then
     COMPILED_DIR="$(dirname "$INPUT_DIR")"
   else
@@ -98,6 +106,27 @@ if [[ "$COMPILED_MODE" == "1" ]]; then
     exit 1
   fi
 else
+  case "$INPUT_DIR" in
+    *.tar.gz|*.tgz)
+      if [[ ! -f "$INPUT_DIR" ]]; then
+        echo "missing endpoint archive: $INPUT_DIR" >&2
+        exit 1
+      fi
+      TMP_DIR="$(mktemp -d)"
+      tar -xzf "$INPUT_DIR" -C "$TMP_DIR"
+      extracted_package="$(find "$TMP_DIR" -type d -name "$NORM_PACKAGE" -print -quit)"
+      if [[ -z "$extracted_package" ]]; then
+        echo "archive does not contain $NORM_PACKAGE: $INPUT_DIR" >&2
+        exit 1
+      fi
+      INPUT_DIR="$(dirname "$extracted_package")"
+      ;;
+  esac
+
+  if [[ ! -d "$INPUT_DIR" ]]; then
+    echo "missing endpoint input directory: $INPUT_DIR" >&2
+    exit 1
+  fi
   if [[ "$(basename "$INPUT_DIR")" == "$NORM_PACKAGE" ]]; then
     INPUT_DIR="$(dirname "$INPUT_DIR")"
   fi

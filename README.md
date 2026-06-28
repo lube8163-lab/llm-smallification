@@ -56,7 +56,7 @@ back to the Mac, then refresh the app-local endpoint:
 
 ```bash
 ./scripts/runpod_refresh_gemma4_coreml_endpoint.sh
-./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-or-dir>
+./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>
 ```
 
 Then build the probe app for a simulator:
@@ -128,6 +128,8 @@ For generation quality probes, the preferred endpoint is now
 language-model RMSNorm and Gemma final logit softcap before lm_head. If that
 bundle is not present, the app falls back to the older linear-only
 `gemma4_12b_lm_head_1tok_int4_block32.mlmodelc` and logs `LM head fallback`.
+With the preferred endpoint present, it logs `LM head target` before loading the
+norm+lm_head bundle.
 
 The UI and launch arguments allow separate compute-unit choices for the large
 decoder packages and the endpoint packages (embedding and LM head). Use

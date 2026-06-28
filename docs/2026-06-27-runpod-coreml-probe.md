@@ -184,7 +184,7 @@ verify/package on RunPod, then compile into a separate local output directory
 and copy only endpoint bundles:
 
 ```bash
-python scripts/package_runpod_coreml_endpoint.py --tar-gz /workspace/gemma12b/gemma4-norm-lm-head-endpoint.tar.gz
+./scripts/runpod_refresh_gemma4_coreml_endpoint.sh
 ```
 
 ```bash
@@ -402,7 +402,9 @@ path and feeding those embeddings into the same 3840-wide decoder stack.
 - Linux can save MLPackages, but cannot execute or fully validate Apple runtime
   behavior.
 - The full 48-layer text stack has been copied to the Mac, compiled, bundled,
-  and run on iPhone. RunPod is no longer needed for this fixed-shape probe.
+  and run on iPhone. RunPod is no longer needed for the existing fixed-shape
+  decoder probe, but it is needed again when endpoint packages must be
+  reconverted from the Gemma weights.
 - Compressed package size is not the same as peak resident memory on iPhone.
   The iPhone test must measure load/predict/release behavior on device.
 - The app still uses fixed-shape input IDs. There is no on-device tokenizer,

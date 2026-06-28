@@ -84,8 +84,8 @@ Use this prompt to continue in a fresh Codex chat.
 
 1. まず `git status --short` を確認してください。
 2. `docs/handoff-current.md` と `docs/2026-06-27-runpod-coreml-probe.md` を読んでください。
-3. RunPod側で `python scripts/runpod_convert_gemma4_coreml_endpoints.py --target norm-lm-head` を実行し、新しい `gemma4_12b_norm_lm_head_1tok_int4_block32.mlpackage` を作ってください。
-4. RunPod側で `python scripts/package_runpod_coreml_endpoint.py --tar-gz /workspace/gemma12b/gemma4-norm-lm-head-endpoint.tar.gz` を実行し、生成物とSHA256SUMSを確認してください。
+3. RunPod側で `./scripts/runpod_refresh_gemma4_coreml_endpoint.sh` を実行し、新しい `gemma4_12b_norm_lm_head_1tok_int4_block32.mlpackage` と転送用tarballを作ってください。
+4. 生成物または `/workspace/gemma12b/gemma4-norm-lm-head-endpoint.tar.gz` をMacへコピーしてください。
 5. Mac側で `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-or-dir>` を実行してください。これでcompile、endpoint-only copy、strict verify、generic iOS buildまで一括で走ります。
 6. 実機では endpoint `CPU`, decoder `CPU+GPU`, `Layers = First 48`, `Cache = Run end` のまま、ログに `Load gemma4_12b_norm_lm_head_1tok_int4_block32` が出て `LM head fallback` が出ないことを確認してください。
 7. token window は `python3 scripts/gemma4_token_helper.py --prompt "..."` の `input_ids_last4` をChat本文または `Token window` 欄に貼って、まず `Tokens = 8`、安定すれば `16` を試してください。生成 ID の確認は `--decode-ids` です。

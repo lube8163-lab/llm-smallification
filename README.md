@@ -50,11 +50,12 @@ After copying selected compiled Core ML bundles from RunPod into
 ./scripts/prepare_ios_coreml_probe_assets.sh
 ```
 
-When updating only the corrected generation endpoint, compile the endpoint
-package into a small temporary output directory and copy just that bundle:
+When updating only the corrected generation endpoint, run the RunPod-side
+conversion/package wrapper, transfer the resulting endpoint package or archive
+back to the Mac, then refresh the app-local endpoint:
 
 ```bash
-python scripts/package_runpod_coreml_endpoint.py --tar-gz /workspace/gemma12b/gemma4-norm-lm-head-endpoint.tar.gz
+./scripts/runpod_refresh_gemma4_coreml_endpoint.sh
 ./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-or-dir>
 ```
 

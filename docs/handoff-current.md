@@ -108,6 +108,9 @@ Use this when continuing in a fresh Codex chat.
   After compiling the `.mlpackage` outputs locally, `prepare_ios_coreml_probe_assets.sh`
   copies the norm+lm_head bundle when present and removes stale legacy/new LM
   head bundles from the iOS target before copying.
+- `scripts/runpod_refresh_gemma4_coreml_endpoint.sh` is the preferred RunPod
+  entrypoint for the endpoint quality fix. It converts the corrected norm+lm_head
+  endpoint, writes SHA256 sums, and creates a transfer tarball.
 - `scripts/package_runpod_coreml_endpoint.py` can run on RunPod after endpoint
   conversion to verify the expected `.mlpackage`, write SHA256 sums, and
   optionally create a transfer `.tar.gz`.
@@ -140,9 +143,7 @@ completed tokenizer-derived `Tokens = 8` and earlier `Tokens = 16` runs through
 all 48 layers without crashing.
 
 1. Reconnect RunPod or another CUDA host with the Gemma weights and run:
-   `python scripts/runpod_convert_gemma4_coreml_endpoints.py --target norm-lm-head`.
-   Then verify/package the output on RunPod with
-   `python scripts/package_runpod_coreml_endpoint.py --tar-gz /workspace/gemma12b/gemma4-norm-lm-head-endpoint.tar.gz`.
+   `./scripts/runpod_refresh_gemma4_coreml_endpoint.sh`.
    Then run `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-or-dir>`
    on the Mac to compile, copy, verify, and build.
 2. Verify the device log loads

@@ -50,7 +50,7 @@ struct ChatScreen: View {
                     LabeledContent("Mode", value: ProbeRunMode.generateTokenLoop.title)
 
                     Picker("Endpoints", selection: $viewModel.endpointComputeSelection) {
-                        ForEach(ProbeComputeSelection.allCases) { selection in
+                        ForEach(ProbeComputeSelection.endpointCases) { selection in
                             Text(selection.title).tag(selection)
                         }
                     }
@@ -284,7 +284,7 @@ struct ProbeScreen: View {
                         }
                     }
                     Picker("Endpoints", selection: $viewModel.endpointComputeSelection) {
-                        ForEach(ProbeComputeSelection.allCases) { selection in
+                        ForEach(ProbeComputeSelection.endpointCases) { selection in
                             Text(selection.title).tag(selection)
                         }
                     }
@@ -417,7 +417,7 @@ enum TokenDisplay {
 @MainActor
 final class ChatViewModel: ObservableObject {
     @Published var endpointComputeSelection = ProbeComputeSelection.selectedEndpointFromProcess(default: .cpuOnly)
-    @Published var decoderComputeSelection = ProbeComputeSelection.selectedDecoderFromProcess(default: .cpuOnly)
+    @Published var decoderComputeSelection = ProbeComputeSelection.selectedDecoderFromProcess(default: .cpuAndGPU)
     @Published var layerSelection = ProbeLayerSelection.selectedFromProcess(default: .first48)
     @Published var cacheClearPolicy = ProbeCacheClearPolicy.selectedFromProcess(default: .runEndOnly)
     @Published var inputIDsText = ProbeRunner.selectedInputIDsTextFromProcess()

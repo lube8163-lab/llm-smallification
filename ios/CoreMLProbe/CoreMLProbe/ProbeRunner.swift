@@ -28,6 +28,11 @@ enum ProbeComputeSelection: String, CaseIterable, Identifiable {
         }
     }
 
+    static let endpointCases: [ProbeComputeSelection] = [
+        .cpuOnly,
+        .cpuAndGPU
+    ]
+
     static func selectedFromProcess(default fallback: ProbeComputeSelection) -> ProbeComputeSelection {
         selectedFromProcess(
             environmentKey: "COREML_PROBE_COMPUTE",
@@ -134,6 +139,17 @@ enum ProbeRunMode: String, CaseIterable, Identifiable {
 
     var usesGeneratedTokenCount: Bool {
         self == .generateTokenLoop
+    }
+
+    var usesEndpointModels: Bool {
+        switch self {
+        case .loadEmbedding, .loadLMHead, .loadAllSequential, .embeddingOnly,
+                .lmHeadOnly, .fullSequential, .fullStackSequential,
+                .generateOneToken, .generateTokenLoop:
+            true
+        case .loadDecoder, .loadDecoderStack, .decoderOnly, .decoderStack:
+            false
+        }
     }
 
     static func selectedFromProcess(default fallback: ProbeRunMode) -> ProbeRunMode {
@@ -438,6 +454,7 @@ enum ProbeRunner {
             print("[CoreMLProbe] run started compute=\(computePlan.logDetail) mode=\(mode.rawValue) layers=\(layerSelection.rawValue) cache=\(cacheClearPolicy.rawValue)")
             recordStep("Start", detail: "\(computePlan.logDetail), \(mode.title), \(layerSelection.title), cache=\(cacheClearPolicy.title)", steps: &steps)
             clearCoreMLRuntimeCache(reason: "run start", steps: &steps)
+            try validateComputePlan(computePlan, mode: mode)
 
             let endpointConfig = makeConfig(computePlan.endpoint)
             let decoderConfig = makeConfig(computePlan.decoder)
@@ -608,6 +625,18 @@ enum ProbeRunner {
         let config = MLModelConfiguration()
         config.computeUnits = selection.units
         return config
+    }
+
+    private static func validateComputePlan(_ computePlan: ProbeComputePlan, mode: ProbeRunMode) throws {
+        guard mode.usesEndpointModels else { return }
+        switch computePlan.endpoint {
+        case .cpuOnly, .cpuAndGPU:
+            return
+        case .all, .cpuAndNeuralEngine:
+            throw ProbeError.unsafeComputeConfiguration(
+                "Endpoint \(computePlan.endpoint.title) is disabled for modes that load embedding or LM head because endpoint All exceeded the iPhone high-water memory limit during MLModel load. Use endpoint CPU with decoder CPU+GPU."
+            )
+        }
     }
 
     private static func recordStep(_ name: String, seconds: Double? = nil, detail: String = "", steps: inout [ProbeStep]) {
@@ -1204,6 +1233,7 @@ enum ProbeError: LocalizedError {
     case invalidInputIDs(String)
     case invalidTokenCount(String)
     case unexpectedShape(String)
+    case unsafeComputeConfiguration(String)
 
     var errorDescription: String? {
         switch self {
@@ -1217,6 +1247,8 @@ enum ProbeError: LocalizedError {
             "Invalid token count: \(detail)"
         case .unexpectedShape(let detail):
             "Unexpected shape: \(detail)"
+        case .unsafeComputeConfiguration(let detail):
+            "Unsafe compute configuration: \(detail)"
         }
     }
 }

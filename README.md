@@ -79,6 +79,7 @@ the full pipeline. Useful scheme arguments or launch environment values:
 --autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=2 --cache-policy=every-8-layers
 --autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=8 --cache-policy=run-end-only
 --autorun --mode=generate-token-loop --layers=8 --input-ids=2,123,4567,106 --tokens=1 --cache-policy=run-end-only --decoder-compute=cpuAndGPU --endpoint-compute=cpuOnly
+--autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=8 --cache-policy=run-end-only --endpoint-compute=cpuOnly --decoder-compute=cpuAndGPU
 ```
 
 ```bash
@@ -113,8 +114,13 @@ single `COREML_PROBE_COMPUTE` / `--compute=` setting remains as a shared
 fallback. For accelerator probing on iPhone, start with `--layers=1`,
 `--layers=8`, then `16`, `32`, and finally `48`, keeping
 `--cache-policy=run-end-only` and `--tokens=1` until the smaller run is stable.
-The generated token count can be raised up to `32`, but the default stays at
-`2` because full 48-layer CPU generation is still slow.
+The fastest stable measured split is endpoint `CPU` with decoder `CPU+GPU`; on
+an iPhone18,3 this completed all 48 layers for 8 generated tokens with about
+`316 MB` peak memory and about `13.7 sec/token` after the first token. Endpoint
+`All` exceeded the iOS high-water memory limit during endpoint model load, so
+endpoint modes that include ANE are hidden in the UI and blocked before load for
+endpoint-using modes. The generated token count can be raised up to `32`, but
+the default stays at `2` because full 48-layer generation is still slow.
 
 The cache policy controls how often `com.apple.e5rt.e5bundlecache` is removed
 after model release. Supported values are `every-model` (default/safest),

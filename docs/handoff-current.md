@@ -49,6 +49,16 @@ Use this when continuing in a fresh Codex chat.
     tokens all `#253027`, timed steps about `459.1 sec`. Token 1 took
     `67.5 sec`; tokens 2-8 averaged `54.7 sec/token` and stayed near
     `39-43 MB` peak.
+  - `generate-token-loop`, endpoint `CPU`, decoder `CPU+GPU`, `Cache = Run end`,
+    `Tokens = 8`: peak `316.2 MB`, tokens all `#253027`, token totals summed
+    to about `115.9 sec`. Token 1 took `20.1 sec`; tokens 2-8 averaged about
+    `13.7 sec/token`.
+  - Endpoint `CPU+GPU` with decoder `CPU+GPU` passed a 1-token 48-layer run but
+    peaked at `1152.0 MB` and was slower than endpoint `CPU`.
+  - Endpoint `All` crashed while loading endpoint models with
+    `EXC_RESOURCE (RESOURCE_TYPE_MEMORY)` at the iOS high-water limit
+    (`3376 MB`), so endpoint modes that include ANE are hidden in the UI and
+    blocked before endpoint model load.
 - In `generate-one-token`, most time is model load/release overhead:
   about `63.7 sec` of timed steps were package loads, while all 48 decoder
   predictions totaled about `1.4 sec`.
@@ -78,6 +88,9 @@ Use this when continuing in a fresh Codex chat.
   - `COREML_PROBE_ENDPOINT_COMPUTE` or `--endpoint-compute=`
   - `COREML_PROBE_DECODER_COMPUTE` or `--decoder-compute=`
   - `COREML_PROBE_COMPUTE` or `--compute=` remains the shared fallback.
+- Chat now defaults to endpoint `CPU` and decoder `CPU+GPU`, which is the
+  fastest stable measured split so far. Probe still starts conservatively unless
+  launch settings override it.
 - Accept cache-clear policy via `COREML_PROBE_CACHE_POLICY`, `--cache-policy=`,
   or the Cache picker. Values: `every-model`, `every-4-layers`,
   `every-8-layers`, `per-token`, `run-end-only`.
@@ -90,19 +103,17 @@ Use this when continuing in a fresh Codex chat.
 
 ## Recommended next step
 
-The best current cache policy for generation is `Run end`: it keeps Core ML's
-runtime cache warm during a response, then clears it after the run. The CPU
-48-layer path is stable, so the next step is to measure accelerator mixes
-without jumping straight to a full 48-layer run.
+The best current cache policy for generation is `Run end`, and the best measured
+compute split is endpoint `CPU` with decoder `CPU+GPU`. That combination has
+completed `Tokens = 8` through all 48 layers without crashing.
 
-1. On iPhone, test `generate-token-loop` with `tokens=1`, `Run end`, and
-   decoder compute `CPU+GPU` or `All` at `Layers = First 1`, then `8`, `16`,
-   `32`, and only then `48`.
-2. If a decoder accelerator mix is stable, compare endpoint compute (`CPU`,
-   `CPU+GPU`, `All`) separately because LM head behavior can differ from
-   decoder behavior.
-3. Use `scripts/gemma4_token_helper.py --prompt ...` to feed better 4-token
-   windows and `--decode-ids ...` to inspect generated IDs.
+1. Next, test the same split with `Tokens = 16`, then `32` if memory stays near
+   the `300-350 MB` range.
+2. Use `scripts/gemma4_token_helper.py --prompt ...` to feed better 4-token
+   windows and `--decode-ids ...` to inspect generated IDs; the current default
+   window tends to collapse to repeated `#253027`.
+3. If probing more accelerator behavior, keep endpoint `CPU` and test decoder
+   `All` from small layer counts upward (`First 1`, `8`, `16`, `32`, `48`).
 4. Keep image/audio as a planned attachment surface in the UI, but do not wire
    it to inference until modality embedding/projection packages are converted.
 

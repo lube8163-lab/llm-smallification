@@ -26,22 +26,30 @@ Use this prompt to continue in a fresh Codex chat.
 実機検証の現状:
 
 - Device: iPhone18,3 / iOS 26.4.2
-- Compute: CPU
+- Best compute split so far: endpoint `CPU`, decoder `CPU+GPU`
 - Layers: First 48
 - Cache policy: Run end
-- `generate-token-loop`, `Tokens = 8` が完走済み
-- 8token結果:
+- CPU-only `generate-token-loop`, `Tokens = 8` は完走済み
   - total timed steps: 約 459.1 sec
   - peak: 226.2 MB
-  - token 1: 67.5 sec, peak 226.2 MB
-  - tokens 2-8: 平均 54.7 sec/token, peak 39-43 MB付近
-  - 後続tokenではdecoder loadがほぼ消え、decoder predictが主なボトルネック
+  - token 1: 67.5 sec
+  - tokens 2-8: 平均 54.7 sec/token
+- endpoint `CPU`, decoder `CPU+GPU`, `generate-token-loop`, `Tokens = 8` も完走済み
+  - token totals sum: 約 115.9 sec
+  - peak: 316.2 MB
+  - token 1: 20.1 sec
+  - tokens 2-8: 平均 13.7 sec/token
+  - 生成は現状 `#253027` に寄るため、品質ではなく速度・安定性評価として見る
+- endpoint `CPU+GPU`, decoder `CPU+GPU` は1token完走したが peak `1152.0 MB` で遅めでした。
+- endpoint `All` は endpoint model load 中に `EXC_RESOURCE (RESOURCE_TYPE_MEMORY)` / high-water `3376 MB` でクラッシュしました。アプリ側では endpoint の ANE 系（`All`, `CPU+ANE`）を通常Pickerから外し、指定されてもロード前に失敗させるガードを追加済みです。
 
 現在の結論:
 
 - メモリ方針は妥当です。
 - `run-end-only` が現時点の生成用cache policyとして最良です。
-- 次は、実機で accelerator の安定範囲を小さい layer 数から測りつつ、host tokenizer helper で固定4token windowを改善するのがよいです。
+- endpoint は `CPU` 固定、decoder は `CPU+GPU` が現時点の本命です。
+- Chat の既定 decoder は `CPU+GPU` に変更済みです。
+- 次は `Tokens = 16`、余裕があれば `32`、並行して host tokenizer helper で固定4token windowを改善するのがよいです。
 
 マルチモーダル方針:
 
@@ -54,8 +62,8 @@ Use this prompt to continue in a fresh Codex chat.
 
 1. まず `git status --short` を確認してください。
 2. `docs/handoff-current.md` と `docs/2026-06-27-runpod-coreml-probe.md` を読んでください。
-3. 実機ではまず `Tokens = 1`, `Cache = Run end` のまま、decoder compute を `CPU+GPU` または `All` にして `First 1 -> 8 -> 16 -> 32 -> 48` の順に攻めてください。
-4. decoder 側が安定したら endpoint compute（embedding / LM head）を `CPU`, `CPU+GPU`, `All` で比較してください。
+3. 実機では endpoint `CPU`, decoder `CPU+GPU`, `Layers = First 48`, `Cache = Run end` のまま、`Tokens = 16` を試してください。安定すれば `32` へ進めてください。
+4. 追加のaccelerator検証をする場合は endpoint `CPU` 固定で、decoder `All` を `Tokens = 1`, `First 1 -> 8 -> 16 -> 32 -> 48` の順に攻めてください。endpoint の `All` / `CPU+ANE` は使わないでください。
 5. token window は `python3 scripts/gemma4_token_helper.py --prompt "..."` の `input_ids_last4` を使って改善してください。生成 ID の確認は `--decode-ids` です。
 6. 変更後は `./scripts/build_coreml_probe_ios.sh` と、必要なら `./scripts/build_coreml_probe_ios.sh 'generic/platform=iOS'` を実行してください。
 7. 意図した差分だけcommit/pushしてください。大きなモデルやXcode署名差分を不用意にstageしないでください。

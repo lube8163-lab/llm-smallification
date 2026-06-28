@@ -54,9 +54,7 @@ When updating only the corrected generation endpoint, compile the endpoint
 package into a small temporary output directory and copy just that bundle:
 
 ```bash
-./scripts/compile_coreml_probe_packages.sh <endpoint-mlpackage-dir> runpod-artifacts/compiled-endpoints
-./scripts/prepare_ios_coreml_probe_assets.sh --endpoints-only runpod-artifacts/compiled-endpoints
-./scripts/verify_coreml_probe_assets.py --require-norm-lm-head --fail-on-legacy
+./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir>
 ```
 
 Then build the probe app for a simulator:

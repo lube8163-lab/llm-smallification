@@ -115,6 +115,9 @@ Use this when continuing in a fresh Codex chat.
 - `scripts/verify_coreml_probe_assets.py` checks the staged iOS model bundles.
   Use `--allow-legacy-lm-head` for the current known legacy state, and use
   `--require-norm-lm-head --fail-on-legacy` after the endpoint refresh.
+- `scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir>` runs the
+  local endpoint refresh flow: compile the norm+lm_head package, copy only
+  endpoint bundles, verify strict asset state, then build for generic iOS.
 - `scripts/gemma4_token_helper.py` is a host-side helper for prompt-to-token
   window and generated-ID decode while the app still lacks an on-device
   tokenizer. It depends on `transformers sentencepiece jinja2` and defaults to
@@ -135,18 +138,14 @@ all 48 layers without crashing.
 
 1. Reconnect RunPod or another CUDA host with the Gemma weights and run:
    `python scripts/runpod_convert_gemma4_coreml_endpoints.py --target norm-lm-head`.
-   Then compile/copy the resulting endpoint package into the iOS target:
-   `./scripts/compile_coreml_probe_packages.sh <endpoint-mlpackage-dir> runpod-artifacts/compiled-endpoints`
-   and
-   `./scripts/prepare_ios_coreml_probe_assets.sh --endpoints-only runpod-artifacts/compiled-endpoints`.
-2. Verify the staged assets with
-   `./scripts/verify_coreml_probe_assets.py --require-norm-lm-head --fail-on-legacy`.
-3. Rebuild the app and verify the device log loads
+   Then run `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir>`
+   on the Mac to compile, copy, verify, and build.
+2. Verify the device log loads
    `gemma4_12b_norm_lm_head_1tok_int4_block32` with no `LM head fallback`.
-4. Test endpoint `CPU`, decoder `CPU+GPU`, `Layers = First 48`,
+3. Test endpoint `CPU`, decoder `CPU+GPU`, `Layers = First 48`,
    `Cache = Run end`, tokenizer-derived `Tokens = 8` first, then `16` if peak
    memory stays near the `300-350 MB` range.
-5. Use `scripts/gemma4_token_helper.py --prompt ...` to feed better 4-token
+4. Use `scripts/gemma4_token_helper.py --prompt ...` to feed better 4-token
    windows and `--decode-ids ...` to inspect generated IDs; the current default
    window tends to collapse to repeated `#253027`.
    - Latest 16-token iPhone test showed run 1 sliding from `2,123,4567,106` to
@@ -158,9 +157,9 @@ all 48 layers without crashing.
      app used the pasted window, but it still collapsed to `#253027` by token 5.
      Inspection of the shipped LM head MIL showed it was linear-only, so the
      next fix is the norm+lm_head endpoint package above.
-6. If probing more accelerator behavior, keep endpoint `CPU` and test decoder
+5. If probing more accelerator behavior, keep endpoint `CPU` and test decoder
    `All` from small layer counts upward (`First 1`, `8`, `16`, `32`, `48`).
-7. Keep image/audio as a planned attachment surface in the UI, but do not wire
+6. Keep image/audio as a planned attachment surface in the UI, but do not wire
    it to inference until modality embedding/projection packages are converted.
 
 ## Multimodal notes

@@ -134,6 +134,10 @@ Use this when continuing in a fresh Codex chat.
   can enforce the post-refresh expectations: preferred norm+lm_head endpoint,
   no fallback, expected layer count, generated token count, repeat detection,
   and peak-memory ceiling.
+- `scripts/preflight_coreml_probe_device.sh` is the strict local gate before a
+  real-device run. It verifies staged assets, requires the corrected norm+lm_head
+  endpoint by default, runs a generic iOS build, and prints the recommended
+  device settings plus log analyzer command.
 - A simple app icon exists in `Assets.xcassets/AppIcon.appiconset`.
 - Chat composer text is not tokenized on device yet. It now accepts pasted
   `input_ids_last4=...`, `input_ids=...`, four `#123` IDs, or four raw IDs from
@@ -151,14 +155,15 @@ all 48 layers without crashing.
    `./scripts/runpod_refresh_gemma4_coreml_endpoint.sh`.
    Then run `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>`
    on the Mac to compile, copy, verify, and build.
-2. Verify the device log loads
+2. Run `./scripts/preflight_coreml_probe_device.sh`.
+3. Verify the device log loads
    `gemma4_12b_norm_lm_head_1tok_int4_block32` with no `LM head fallback`.
-3. Save the Xcode console output and run
+4. Save the Xcode console output and run
    `./scripts/analyze_coreml_probe_log.py <log> --require-norm-lm-head --fail-on-repeat --expect-layers 48 --min-generated-tokens 8 --max-peak-mb 350`.
-4. Test endpoint `CPU`, decoder `CPU+GPU`, `Layers = First 48`,
+5. Test endpoint `CPU`, decoder `CPU+GPU`, `Layers = First 48`,
    `Cache = Run end`, tokenizer-derived `Tokens = 8` first, then `16` if peak
    memory stays near the `300-350 MB` range.
-5. Use `scripts/gemma4_token_helper.py --prompt ...` to feed better 4-token
+6. Use `scripts/gemma4_token_helper.py --prompt ...` to feed better 4-token
    windows and `--decode-ids ...` to inspect generated IDs; the current default
    window tends to collapse to repeated `#253027`.
    - Latest 16-token iPhone test showed run 1 sliding from `2,123,4567,106` to
@@ -170,9 +175,9 @@ all 48 layers without crashing.
      app used the pasted window, but it still collapsed to `#253027` by token 5.
      Inspection of the shipped LM head MIL showed it was linear-only, so the
      next fix is the norm+lm_head endpoint package above.
-6. If probing more accelerator behavior, keep endpoint `CPU` and test decoder
+7. If probing more accelerator behavior, keep endpoint `CPU` and test decoder
    `All` from small layer counts upward (`First 1`, `8`, `16`, `32`, `48`).
-7. Keep image/audio as a planned attachment surface in the UI, but do not wire
+8. Keep image/audio as a planned attachment surface in the UI, but do not wire
    it to inference until modality embedding/projection packages are converted.
 
 ## Multimodal notes

@@ -178,6 +178,13 @@ generation summary:
   --max-peak-mb 350
 ```
 
+Before opening Xcode for the device run, run the strict local preflight after
+the endpoint refresh:
+
+```bash
+./scripts/preflight_coreml_probe_device.sh
+```
+
 For an actual iPhone, open `ios/CoreMLProbe/CoreMLProbe.xcodeproj` in Xcode,
 select a signing team, choose the device, and run the `CoreMLProbe` scheme.
 The copied `.mlmodelc` bundles remain ignored by git.

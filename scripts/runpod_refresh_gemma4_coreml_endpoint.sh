@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL_DIR="/workspace/gemma12b/models/gemma-4-12b-it-qat-q4_0-unquantized"
 OUT_DIR="/workspace/gemma12b/coreml-endpoints-seq4-int4"
 ARCHIVE="/workspace/gemma12b/gemma4-norm-lm-head-endpoint.tar.gz"
+PYTHON_BIN="${PYTHON:-python}"
 SEQ_LEN=4
 BLOCK_SIZE=32
 FORCE_CONVERT=1
@@ -22,6 +23,7 @@ Options:
   --model-dir PATH   Gemma QAT-unquantized model directory.
   --out-dir PATH     Core ML endpoint .mlpackage output directory.
   --archive PATH     Transfer archive to write after conversion.
+  --python PATH      Python executable to use for preflight/conversion/package.
   --seq-len N        Embedding sequence length for optional embedding target.
   --block-size N     Int4 block size.
   --no-force         Skip conversion when the target package already exists.
@@ -59,6 +61,11 @@ while [[ $# -gt 0 ]]; do
     --archive)
       require_value "$@"
       ARCHIVE="$2"
+      shift 2
+      ;;
+    --python)
+      require_value "$@"
+      PYTHON_BIN="$2"
       shift 2
       ;;
     --seq-len)
@@ -123,11 +130,12 @@ if [[ "$SKIP_PREFLIGHT" != "1" ]]; then
     --model-dir "$MODEL_DIR" \
     --out-dir "$OUT_DIR" \
     --archive "$ARCHIVE" \
+    --python "$PYTHON_BIN" \
     --min-free-gb "$MIN_FREE_GB"
 fi
 
 convert_args=(
-  python
+  "$PYTHON_BIN"
   "$ROOT_DIR/scripts/runpod_convert_gemma4_coreml_endpoints.py"
   --target norm-lm-head
   --model-dir "$MODEL_DIR"
@@ -144,7 +152,7 @@ if [[ "$KEEP_FP16" == "1" ]]; then
 fi
 
 run_cmd "${convert_args[@]}"
-run_cmd python "$ROOT_DIR/scripts/package_runpod_coreml_endpoint.py" \
+run_cmd "$PYTHON_BIN" "$ROOT_DIR/scripts/package_runpod_coreml_endpoint.py" \
   --out-dir "$OUT_DIR" \
   --tar-gz "$ARCHIVE"
 

@@ -70,25 +70,40 @@ Use this when continuing in a fresh Codex chat.
 - Keep the fixed 4-token shape.
 - Accept prompt IDs via `COREML_PROBE_INPUT_IDS` or `--input-ids=`.
 - Accept generated token count via `COREML_PROBE_GENERATE_TOKENS` or
-  `--tokens=`. The app clamps the UI to `1...8`.
+  `--tokens=`. The app clamps the UI to `1...32`, but still defaults to `2`.
+- The app now has `Chat` and `Probe` tabs. Chat wraps `generate-token-loop`
+  and keeps `Cache = Run end` as the default.
+- Endpoint models (embedding and LM head) and decoder layers can use separate
+  compute-unit settings:
+  - `COREML_PROBE_ENDPOINT_COMPUTE` or `--endpoint-compute=`
+  - `COREML_PROBE_DECODER_COMPUTE` or `--decoder-compute=`
+  - `COREML_PROBE_COMPUTE` or `--compute=` remains the shared fallback.
 - Accept cache-clear policy via `COREML_PROBE_CACHE_POLICY`, `--cache-policy=`,
   or the Cache picker. Values: `every-model`, `every-4-layers`,
   `every-8-layers`, `per-token`, `run-end-only`.
 - Run embedding -> selected decoder layers -> last-token LM head -> argmax.
-- Log `Prompt IDs` and `Next token`.
+- Log `Prompt IDs`, generated tokens, per-token total time, and peak memory.
+- `scripts/gemma4_token_helper.py` is a host-side helper for prompt-to-token
+  window and generated-ID decode while the app still lacks an on-device
+  tokenizer.
 - A simple app icon exists in `Assets.xcassets/AppIcon.appiconset`.
 
 ## Recommended next step
 
 The best current cache policy for generation is `Run end`: it keeps Core ML's
-runtime cache warm during a response, then clears it after the run. The 8-token
-probe is stable enough to move to text chat plumbing.
+runtime cache warm during a response, then clears it after the run. The CPU
+48-layer path is stable, so the next step is to measure accelerator mixes
+without jumping straight to a full 48-layer run.
 
-1. Add tokenizer/prompt formatting or a host-side helper that feeds known-good
-   token IDs.
-2. Build a chat UI around the existing fixed-window generator while keeping
-   `Run end` as the generation cache policy.
-3. Keep image/audio as a planned attachment surface in the UI, but do not wire
+1. On iPhone, test `generate-token-loop` with `tokens=1`, `Run end`, and
+   decoder compute `CPU+GPU` or `All` at `Layers = First 1`, then `8`, `16`,
+   `32`, and only then `48`.
+2. If a decoder accelerator mix is stable, compare endpoint compute (`CPU`,
+   `CPU+GPU`, `All`) separately because LM head behavior can differ from
+   decoder behavior.
+3. Use `scripts/gemma4_token_helper.py --prompt ...` to feed better 4-token
+   windows and `--decode-ids ...` to inspect generated IDs.
+4. Keep image/audio as a planned attachment surface in the UI, but do not wire
    it to inference until modality embedding/projection packages are converted.
 
 ## Multimodal notes

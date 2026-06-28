@@ -29,11 +29,62 @@ enum ProbeComputeSelection: String, CaseIterable, Identifiable {
     }
 
     static func selectedFromProcess(default fallback: ProbeComputeSelection) -> ProbeComputeSelection {
+        selectedFromProcess(
+            environmentKey: "COREML_PROBE_COMPUTE",
+            argumentPrefix: "--compute=",
+            default: fallback
+        )
+    }
+
+    static func selectedEndpointFromProcess(default fallback: ProbeComputeSelection) -> ProbeComputeSelection {
+        selectedFromProcess(
+            environmentKey: "COREML_PROBE_ENDPOINT_COMPUTE",
+            argumentPrefix: "--endpoint-compute=",
+            default: selectedFromProcess(default: fallback)
+        )
+    }
+
+    static func selectedDecoderFromProcess(default fallback: ProbeComputeSelection) -> ProbeComputeSelection {
+        selectedFromProcess(
+            environmentKey: "COREML_PROBE_DECODER_COMPUTE",
+            argumentPrefix: "--decoder-compute=",
+            default: selectedFromProcess(default: fallback)
+        )
+    }
+
+    private static func selectedFromProcess(
+        environmentKey: String,
+        argumentPrefix: String,
+        default fallback: ProbeComputeSelection
+    ) -> ProbeComputeSelection {
         let environment = ProcessInfo.processInfo.environment
-        if let value = environment["COREML_PROBE_COMPUTE"], let selection = ProbeComputeSelection(rawValue: value) {
+        if let value = environment[environmentKey], let selection = ProbeComputeSelection(rawValue: value) {
             return selection
         }
+
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(argumentPrefix) }) {
+            let value = String(argument.dropFirst(argumentPrefix.count))
+            if let selection = ProbeComputeSelection(rawValue: value) {
+                return selection
+            }
+        }
         return fallback
+    }
+}
+
+struct ProbeComputePlan {
+    let endpoint: ProbeComputeSelection
+    let decoder: ProbeComputeSelection
+
+    static func shared(_ selection: ProbeComputeSelection) -> ProbeComputePlan {
+        ProbeComputePlan(endpoint: selection, decoder: selection)
+    }
+
+    var logDetail: String {
+        if endpoint == decoder {
+            return endpoint.title
+        }
+        return "endpoints=\(endpoint.title), decoder=\(decoder.title)"
     }
 }
 
@@ -336,7 +387,7 @@ enum ProbeRunner {
     private static let lmHeadName = "gemma4_12b_lm_head_1tok_int4_block32"
     private static let defaultInputIDs: [Int32] = [2, 123, 4567, 106]
     static let defaultGeneratedTokenCount = 2
-    static let maxGeneratedTokenCount = 8
+    static let maxGeneratedTokenCount = 32
 
     static var defaultInputIDsText: String {
         formatInputIDs(defaultInputIDs)
@@ -363,22 +414,40 @@ enum ProbeRunner {
         inputIDsText: String? = nil,
         generatedTokenCount: Int? = nil
     ) -> Result<ProbeReport, ProbeFailure> {
+        run(
+            computePlan: .shared(computeSelection),
+            mode: mode,
+            layerSelection: layerSelection,
+            cacheClearPolicy: cacheClearPolicy,
+            inputIDsText: inputIDsText,
+            generatedTokenCount: generatedTokenCount
+        )
+    }
+
+    static func run(
+        computePlan: ProbeComputePlan,
+        mode: ProbeRunMode,
+        layerSelection: ProbeLayerSelection,
+        cacheClearPolicy: ProbeCacheClearPolicy = .afterEveryModel,
+        inputIDsText: String? = nil,
+        generatedTokenCount: Int? = nil
+    ) -> Result<ProbeReport, ProbeFailure> {
         var steps: [ProbeStep] = []
 
         do {
-            print("[CoreMLProbe] run started compute=\(computeSelection.title) mode=\(mode.rawValue) layers=\(layerSelection.rawValue) cache=\(cacheClearPolicy.rawValue)")
-            recordStep("Start", detail: "\(computeSelection.title), \(mode.title), \(layerSelection.title), cache=\(cacheClearPolicy.title)", steps: &steps)
+            print("[CoreMLProbe] run started compute=\(computePlan.logDetail) mode=\(mode.rawValue) layers=\(layerSelection.rawValue) cache=\(cacheClearPolicy.rawValue)")
+            recordStep("Start", detail: "\(computePlan.logDetail), \(mode.title), \(layerSelection.title), cache=\(cacheClearPolicy.title)", steps: &steps)
             clearCoreMLRuntimeCache(reason: "run start", steps: &steps)
 
-            let config = MLModelConfiguration()
-            config.computeUnits = computeSelection.units
+            let endpointConfig = makeConfig(computePlan.endpoint)
+            let decoderConfig = makeConfig(computePlan.decoder)
 
             let summary: String
             switch mode {
             case .loadEmbedding:
                 try runLoadOnly(
                     named: embeddingName,
-                    config: config,
+                    config: endpointConfig,
                     cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(embeddingName)" : nil,
                     steps: &steps
                 )
@@ -386,7 +455,7 @@ enum ProbeRunner {
             case .loadDecoder:
                 try runLoadOnly(
                     named: decoderName,
-                    config: config,
+                    config: decoderConfig,
                     cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderName),
                     steps: &steps
                 )
@@ -394,7 +463,7 @@ enum ProbeRunner {
             case .loadLMHead:
                 try runLoadOnly(
                     named: lmHeadName,
-                    config: config,
+                    config: endpointConfig,
                     cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(lmHeadName)" : nil,
                     steps: &steps
                 )
@@ -402,19 +471,19 @@ enum ProbeRunner {
             case .loadAllSequential:
                 try runLoadOnly(
                     named: embeddingName,
-                    config: config,
+                    config: endpointConfig,
                     cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(embeddingName)" : nil,
                     steps: &steps
                 )
                 try runLoadOnly(
                     named: decoderName,
-                    config: config,
+                    config: decoderConfig,
                     cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderName),
                     steps: &steps
                 )
                 try runLoadOnly(
                     named: lmHeadName,
-                    config: config,
+                    config: endpointConfig,
                     cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(lmHeadName)" : nil,
                     steps: &steps
                 )
@@ -426,7 +495,7 @@ enum ProbeRunner {
                     let layerPosition = offset + 1
                     try runLoadOnly(
                         named: layer.name,
-                        config: config,
+                        config: decoderConfig,
                         cacheClearReason: cacheClearPolicy.decoderReleaseReason(
                             layerPosition: layerPosition,
                             totalLayers: plan.layers.count,
@@ -438,14 +507,14 @@ enum ProbeRunner {
                 summary = "OK: loaded \(plan.layers.count) decoder layers"
             case .embeddingOnly:
                 let inputIDs = try selectedInputIDs(overrideText: inputIDsText)
-                let hidden = try runEmbedding(config: config, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+                let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 summary = "OK: hidden \(hidden.shape)"
             case .decoderOnly:
                 let hidden = try makeHidden(seqLength: 4)
                 let decoded = try runDecoder(
                     layer: DecoderLayerModel(index: 0, name: decoderName),
                     hidden: hidden,
-                    config: config,
+                    config: decoderConfig,
                     cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderName),
                     steps: &steps
                 )
@@ -454,50 +523,51 @@ enum ProbeRunner {
                 let hidden = try makeHidden(seqLength: 4)
                 let decoded = try runDecoderStack(
                     hidden: hidden,
-                    config: config,
+                    config: decoderConfig,
                     layerSelection: layerSelection,
                     cacheClearPolicy: cacheClearPolicy,
                     steps: &steps
                 )
                 summary = "OK: decoded stack \(decoded.shape)"
             case .lmHeadOnly:
-                let logits = try runLMHead(hidden: try makeLastHidden(), config: config, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+                let logits = try runLMHead(hidden: try makeLastHidden(), config: endpointConfig, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let top = topLogitSummary(logits)
                 recordStep("Top logits", detail: top, steps: &steps)
                 summary = "OK: \(top)"
             case .fullSequential:
                 let inputIDs = try selectedInputIDs(overrideText: inputIDsText)
-                let hidden = try runEmbedding(config: config, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+                let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let decoded = try runDecoder(
                     layer: DecoderLayerModel(index: 0, name: decoderName),
                     hidden: hidden,
-                    config: config,
+                    config: decoderConfig,
                     cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderName),
                     steps: &steps
                 )
                 let lastHidden = try copyLastToken(from: decoded)
-                let logits = try runLMHead(hidden: lastHidden, config: config, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+                let logits = try runLMHead(hidden: lastHidden, config: endpointConfig, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let top = topLogitSummary(logits)
                 recordStep("Top logits", detail: top, steps: &steps)
                 summary = "OK: \(top)"
             case .fullStackSequential:
                 let inputIDs = try selectedInputIDs(overrideText: inputIDsText)
-                let hidden = try runEmbedding(config: config, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+                let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let decoded = try runDecoderStack(
                     hidden: hidden,
-                    config: config,
+                    config: decoderConfig,
                     layerSelection: layerSelection,
                     cacheClearPolicy: cacheClearPolicy,
                     steps: &steps
                 )
                 let lastHidden = try copyLastToken(from: decoded)
-                let logits = try runLMHead(hidden: lastHidden, config: config, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+                let logits = try runLMHead(hidden: lastHidden, config: endpointConfig, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let top = topLogitSummary(logits)
                 recordStep("Top logits", detail: top, steps: &steps)
                 summary = "OK: \(top)"
             case .generateOneToken:
                 let token = try runGenerateOneToken(
-                    config: config,
+                    endpointConfig: endpointConfig,
+                    decoderConfig: decoderConfig,
                     layerSelection: layerSelection,
                     cacheClearPolicy: cacheClearPolicy,
                     inputIDsText: inputIDsText,
@@ -506,7 +576,8 @@ enum ProbeRunner {
                 summary = "OK: next token #\(token.index) \(String(format: "%.3f", token.logit))"
             case .generateTokenLoop:
                 let predictions = try runGenerateTokenLoop(
-                    config: config,
+                    endpointConfig: endpointConfig,
+                    decoderConfig: decoderConfig,
                     layerSelection: layerSelection,
                     cacheClearPolicy: cacheClearPolicy,
                     inputIDsText: inputIDsText,
@@ -521,18 +592,32 @@ enum ProbeRunner {
                 clearCoreMLRuntimeCache(reason: "run end policy=\(cacheClearPolicy.rawValue)", steps: &steps)
             }
 
+            recordPeakMemory(steps: &steps)
             print("[CoreMLProbe] run finished \(summary)")
             return .success(ProbeReport(steps: steps, summary: summary))
         } catch {
             clearCoreMLRuntimeCache(reason: "error cleanup", steps: &steps)
             recordStep("Error", detail: String(describing: error), steps: &steps)
+            recordPeakMemory(steps: &steps)
             print("[CoreMLProbe] run failed: \(String(describing: error))")
             return .failure(ProbeFailure(steps: steps, message: String(describing: error)))
         }
     }
 
+    private static func makeConfig(_ selection: ProbeComputeSelection) -> MLModelConfiguration {
+        let config = MLModelConfiguration()
+        config.computeUnits = selection.units
+        return config
+    }
+
     private static func recordStep(_ name: String, seconds: Double? = nil, detail: String = "", steps: inout [ProbeStep]) {
         appendStep(ProbeStep(name: name, seconds: seconds, memoryMB: ProbeMemory.currentMB(), detail: detail), to: &steps)
+    }
+
+    private static func recordPeakMemory(steps: inout [ProbeStep]) {
+        let peak = steps.map(\.memoryMB).filter { $0 >= 0 }.max() ?? -1
+        guard peak >= 0 else { return }
+        appendStep(ProbeStep(name: "Peak memory", seconds: nil, memoryMB: peak, detail: "max observed during run"), to: &steps)
     }
 
     private static func appendStep(_ step: ProbeStep, to steps: inout [ProbeStep]) {
@@ -576,23 +661,24 @@ enum ProbeRunner {
     }
 
     private static func runGenerateOneToken(
-        config: MLModelConfiguration,
+        endpointConfig: MLModelConfiguration,
+        decoderConfig: MLModelConfiguration,
         layerSelection: ProbeLayerSelection,
         cacheClearPolicy: ProbeCacheClearPolicy,
         inputIDsText: String?,
         steps: inout [ProbeStep]
     ) throws -> (index: Int, logit: Float) {
         let inputIDs = try selectedInputIDs(overrideText: inputIDsText)
-        let hidden = try runEmbedding(config: config, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+        let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
         let decoded = try runDecoderStack(
             hidden: hidden,
-            config: config,
+            config: decoderConfig,
             layerSelection: layerSelection,
             cacheClearPolicy: cacheClearPolicy,
             steps: &steps
         )
         let lastHidden = try copyLastToken(from: decoded)
-        let logits = try runLMHead(hidden: lastHidden, config: config, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+        let logits = try runLMHead(hidden: lastHidden, config: endpointConfig, cacheClearPolicy: cacheClearPolicy, steps: &steps)
         let token = try topLogit(logits)
         recordStep(
             "Next token",
@@ -603,7 +689,8 @@ enum ProbeRunner {
     }
 
     private static func runGenerateTokenLoop(
-        config: MLModelConfiguration,
+        endpointConfig: MLModelConfiguration,
+        decoderConfig: MLModelConfiguration,
         layerSelection: ProbeLayerSelection,
         cacheClearPolicy: ProbeCacheClearPolicy,
         inputIDsText: String?,
@@ -619,11 +706,12 @@ enum ProbeRunner {
         )
 
         let predictions = try autoreleasepool { () throws -> [TokenPrediction] in
-            let embedding = try loadModel(named: embeddingName, config: config, steps: &steps)
-            let lmHead = try loadModel(named: lmHeadName, config: config, steps: &steps)
+            let embedding = try loadModel(named: embeddingName, config: endpointConfig, steps: &steps)
+            let lmHead = try loadModel(named: lmHeadName, config: endpointConfig, steps: &steps)
             var localPredictions: [TokenPrediction] = []
 
             for step in 1...tokenCount {
+                let tokenStart = Date()
                 let prediction = try autoreleasepool { () throws -> TokenPrediction in
                     recordStep("Prompt IDs \(step)", detail: formatInputIDs(inputWindow), steps: &steps)
                     let hidden = try predictEmbedding(
@@ -634,7 +722,7 @@ enum ProbeRunner {
                     )
                     let decoded = try runDecoderStack(
                         hidden: hidden,
-                        config: config,
+                        config: decoderConfig,
                         layerSelection: layerSelection,
                         cacheClearPolicy: cacheClearPolicy,
                         steps: &steps
@@ -654,6 +742,12 @@ enum ProbeRunner {
                     )
                     return TokenPrediction(step: step, index: token.index, logit: token.logit)
                 }
+                appendStep(ProbeStep(
+                    name: "Token \(step) total",
+                    seconds: Date().timeIntervalSince(tokenStart),
+                    memoryMB: ProbeMemory.currentMB(),
+                    detail: "#\(prediction.index) logit=\(String(format: "%.3f", prediction.logit))"
+                ), to: &steps)
 
                 if cacheClearPolicy == .afterEachToken {
                     clearCoreMLRuntimeCache(reason: "generated token \(step) policy=\(cacheClearPolicy.rawValue)", steps: &steps)

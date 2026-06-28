@@ -5,7 +5,7 @@ Use this prompt to continue in a fresh Codex chat.
 ```text
 このリポジトリ `/Users/tasuku/Documents/llm小型化` の続きから作業してください。
 
-目的は、Gemma 4 12B text-only Core ML probe を、まずはテキストチャットUIへ発展させることです。実用速度はまだ遅いですが、技術検証としてiPhone上で12Bを逐次ロードして動かす方針を続けます。
+目的は、Gemma 4 12B text-only Core ML chat/probe を、クラッシュしない範囲で高速化しつつ、固定4token windowの運用を少しずつ実用寄りにすることです。実用速度はまだ遅いですが、技術検証としてiPhone上で12Bを逐次ロードして動かす方針を続けます。
 
 重要な前提:
 
@@ -16,6 +16,12 @@ Use this prompt to continue in a fresh Codex chat.
 - `ios/CoreMLProbe/CoreMLProbe.xcodeproj/project.pbxproj` にはXcode由来の署名設定差分が残っていることがあります。ユーザーが明示しない限り、署名差分を戻さないでください。
 - 直近でアプリアイコン未反映を修正しました。原因は `ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;` がtarget build settingsに無かったことです。Debug/Release両方に追加済みです。
 - 実機向けビルドで `actool ... --app-icon AppIcon`、`CFBundleIconName = AppIcon`、`AppIcon60x60@2x.png` 生成を確認済みです。
+- CoreMLProbe は `Chat` / `Probe` タブ構成になりました。
+- Chat は `generate-token-loop` を使い、既定は `Cache = Run end`, `Layers = First 48`, `Tokens = 2` です。
+- 生成 token 上限は `32` まで拡張済みです。
+- endpoint compute（embedding / LM head）と decoder compute を別々に選べます。
+- runner は `Token n total` と `Peak memory` をログに出します。
+- `scripts/gemma4_token_helper.py` でホスト側 tokenizer による prompt -> last4 IDs と decode ができます。
 
 実機検証の現状:
 
@@ -35,7 +41,7 @@ Use this prompt to continue in a fresh Codex chat.
 
 - メモリ方針は妥当です。
 - `run-end-only` が現時点の生成用cache policyとして最良です。
-- 次は速度最適化よりも、先にテキストチャット化・tokenizer/prompt formatting・固定4token windowの扱いを整えるのがよいです。
+- 次は、実機で accelerator の安定範囲を小さい layer 数から測りつつ、host tokenizer helper で固定4token windowを改善するのがよいです。
 
 マルチモーダル方針:
 
@@ -48,14 +54,9 @@ Use this prompt to continue in a fresh Codex chat.
 
 1. まず `git status --short` を確認してください。
 2. `docs/handoff-current.md` と `docs/2026-06-27-runpod-coreml-probe.md` を読んでください。
-3. そのうえで、CoreMLProbeを「Probe画面 + Chat画面」の構成にするか、まずChat風UIを既存画面内に追加するかを判断してください。
-4. 最初の実装はテキストチャット優先:
-   - user message入力欄
-   - assistant生成中状態
-   - 生成結果token列の表示
-   - mode/cache/layers/tokensの最低限設定
-   - 将来の画像・音声添付ボタンは未接続またはplaceholderでよい
-5. 実機メモリを壊さないため、生成時は `Cache = Run end` を既定にしてください。
+3. 実機ではまず `Tokens = 1`, `Cache = Run end` のまま、decoder compute を `CPU+GPU` または `All` にして `First 1 -> 8 -> 16 -> 32 -> 48` の順に攻めてください。
+4. decoder 側が安定したら endpoint compute（embedding / LM head）を `CPU`, `CPU+GPU`, `All` で比較してください。
+5. token window は `python3 scripts/gemma4_token_helper.py --prompt "..."` の `input_ids_last4` を使って改善してください。生成 ID の確認は `--decode-ids` です。
 6. 変更後は `./scripts/build_coreml_probe_ios.sh` と、必要なら `./scripts/build_coreml_probe_ios.sh 'generic/platform=iOS'` を実行してください。
 7. 意図した差分だけcommit/pushしてください。大きなモデルやXcode署名差分を不用意にstageしないでください。
 ```

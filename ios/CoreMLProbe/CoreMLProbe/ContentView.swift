@@ -49,7 +49,13 @@ struct ChatScreen: View {
                 Section("Generation") {
                     LabeledContent("Mode", value: ProbeRunMode.generateTokenLoop.title)
 
-                    Picker("Compute", selection: $viewModel.computeSelection) {
+                    Picker("Endpoints", selection: $viewModel.endpointComputeSelection) {
+                        ForEach(ProbeComputeSelection.allCases) { selection in
+                            Text(selection.title).tag(selection)
+                        }
+                    }
+
+                    Picker("Decoder", selection: $viewModel.decoderComputeSelection) {
                         ForEach(ProbeComputeSelection.allCases) { selection in
                             Text(selection.title).tag(selection)
                         }
@@ -277,7 +283,13 @@ struct ProbeScreen: View {
                             Text(mode.title).tag(mode)
                         }
                     }
-                    Picker("Compute", selection: $viewModel.computeSelection) {
+                    Picker("Endpoints", selection: $viewModel.endpointComputeSelection) {
+                        ForEach(ProbeComputeSelection.allCases) { selection in
+                            Text(selection.title).tag(selection)
+                        }
+                    }
+
+                    Picker("Decoder", selection: $viewModel.decoderComputeSelection) {
                         ForEach(ProbeComputeSelection.allCases) { selection in
                             Text(selection.title).tag(selection)
                         }
@@ -382,9 +394,30 @@ struct ChatMessage: Identifiable {
     let isError: Bool
 }
 
+enum TokenDisplay {
+    private static let knownTokens: [Int: String] = [
+        2: "<bos>",
+        255999: "<boi>",
+        256000: "<boa>",
+        258880: "<image>",
+        258881: "<audio>",
+        258882: "<eoi>",
+        258883: "<eoa>"
+    ]
+
+    static func label(for tokenID: Int) -> String {
+        knownTokens[tokenID] ?? "#\(tokenID)"
+    }
+
+    static func joinedLabels(for tokenIDs: [Int]) -> String {
+        tokenIDs.map(label(for:)).joined(separator: " ")
+    }
+}
+
 @MainActor
 final class ChatViewModel: ObservableObject {
-    @Published var computeSelection = ProbeComputeSelection.selectedFromProcess(default: .cpuOnly)
+    @Published var endpointComputeSelection = ProbeComputeSelection.selectedEndpointFromProcess(default: .cpuOnly)
+    @Published var decoderComputeSelection = ProbeComputeSelection.selectedDecoderFromProcess(default: .cpuOnly)
     @Published var layerSelection = ProbeLayerSelection.selectedFromProcess(default: .first48)
     @Published var cacheClearPolicy = ProbeCacheClearPolicy.selectedFromProcess(default: .runEndOnly)
     @Published var inputIDsText = ProbeRunner.selectedInputIDsTextFromProcess()
@@ -415,7 +448,7 @@ final class ChatViewModel: ObservableObject {
 
         let inputIDsText = inputIDsText
         let generatedTokenCount = generatedTokenCount
-        let computeSelection = computeSelection
+        let computePlan = ProbeComputePlan(endpoint: endpointComputeSelection, decoder: decoderComputeSelection)
         let layerSelection = layerSelection
         let cacheClearPolicy = cacheClearPolicy
 
@@ -435,7 +468,7 @@ final class ChatViewModel: ObservableObject {
         Task {
             let result = await Task.detached(priority: .userInitiated) {
                 ProbeRunner.run(
-                    computeSelection: computeSelection,
+                    computePlan: computePlan,
                     mode: .generateTokenLoop,
                     layerSelection: layerSelection,
                     cacheClearPolicy: cacheClearPolicy,
@@ -448,12 +481,13 @@ final class ChatViewModel: ObservableObject {
             case .success(let report):
                 let tokens = Self.generatedTokenIDs(from: report)
                 let tokenText = tokens.map { "#\($0)" }.joined(separator: ", ")
+                let displayText = TokenDisplay.joinedLabels(for: tokens)
                 steps = report.steps
                 summary = report.summary
                 generatedTokenText = tokenText
                 messages.append(ChatMessage(
                     role: .assistant,
-                    text: tokenText.isEmpty ? report.summary : "Generated tokens",
+                    text: displayText.isEmpty ? report.summary : displayText,
                     tokens: tokens,
                     detail: Self.generatedTokenDetail(from: report),
                     isError: false
@@ -534,7 +568,8 @@ final class ChatViewModel: ObservableObject {
 @MainActor
 final class ProbeViewModel: ObservableObject {
     @Published var runMode = ProbeRunMode.selectedFromProcess(default: .loadEmbedding)
-    @Published var computeSelection = ProbeComputeSelection.selectedFromProcess(default: .cpuOnly)
+    @Published var endpointComputeSelection = ProbeComputeSelection.selectedEndpointFromProcess(default: .cpuOnly)
+    @Published var decoderComputeSelection = ProbeComputeSelection.selectedDecoderFromProcess(default: .cpuOnly)
     @Published var layerSelection = ProbeLayerSelection.selectedFromProcess(default: .first8)
     @Published var cacheClearPolicy = ProbeCacheClearPolicy.selectedFromProcess(default: .afterEveryModel)
     @Published var inputIDsText = ProbeRunner.selectedInputIDsTextFromProcess()
@@ -564,7 +599,7 @@ final class ProbeViewModel: ObservableObject {
         summary = "Running"
         currentMemoryText = ProbeMemory.currentText()
 
-        let computeSelection = computeSelection
+        let computePlan = ProbeComputePlan(endpoint: endpointComputeSelection, decoder: decoderComputeSelection)
         let runMode = runMode
         let layerSelection = layerSelection
         let cacheClearPolicy = cacheClearPolicy
@@ -573,7 +608,7 @@ final class ProbeViewModel: ObservableObject {
         Task {
             let result = await Task.detached(priority: .userInitiated) {
                 ProbeRunner.run(
-                    computeSelection: computeSelection,
+                    computePlan: computePlan,
                     mode: runMode,
                     layerSelection: layerSelection,
                     cacheClearPolicy: cacheClearPolicy,

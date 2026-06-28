@@ -78,11 +78,14 @@ the full pipeline. Useful scheme arguments or launch environment values:
 --autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=2
 --autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=2 --cache-policy=every-8-layers
 --autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=8 --cache-policy=run-end-only
+--autorun --mode=generate-token-loop --layers=8 --input-ids=2,123,4567,106 --tokens=1 --cache-policy=run-end-only --decoder-compute=cpuAndGPU --endpoint-compute=cpuOnly
 ```
 
 ```bash
 COREML_PROBE_MODE=load-lm-head
 COREML_PROBE_COMPUTE=cpuOnly
+COREML_PROBE_DECODER_COMPUTE=cpuAndGPU
+COREML_PROBE_ENDPOINT_COMPUTE=cpuOnly
 COREML_PROBE_LAYERS=16
 COREML_PROBE_INPUT_IDS=2,123,4567,106
 COREML_PROBE_GENERATE_TOKENS=8
@@ -102,9 +105,28 @@ and slides the window for a very short generation loop. It reuses the embedding
 and LM head models across generated tokens, while decoder layers still use the
 safer load/predict/release path.
 
+The UI and launch arguments allow separate compute-unit choices for the large
+decoder packages and the endpoint packages (embedding and LM head). Use
+`COREML_PROBE_DECODER_COMPUTE` / `--decoder-compute=` and
+`COREML_PROBE_ENDPOINT_COMPUTE` / `--endpoint-compute=` for this split. The
+single `COREML_PROBE_COMPUTE` / `--compute=` setting remains as a shared
+fallback. For accelerator probing on iPhone, start with `--layers=1`,
+`--layers=8`, then `16`, `32`, and finally `48`, keeping
+`--cache-policy=run-end-only` and `--tokens=1` until the smaller run is stable.
+The generated token count can be raised up to `32`, but the default stays at
+`2` because full 48-layer CPU generation is still slow.
+
 The cache policy controls how often `com.apple.e5rt.e5bundlecache` is removed
 after model release. Supported values are `every-model` (default/safest),
 `every-4-layers`, `every-8-layers`, `per-token`, and `run-end-only`.
+
+Until an on-device tokenizer is bundled, use the host helper to convert a prompt
+into the fixed 4-token app window or decode generated IDs:
+
+```bash
+python3 scripts/gemma4_token_helper.py --prompt "Hello"
+python3 scripts/gemma4_token_helper.py --decode-ids 253027,253027
+```
 
 For an actual iPhone, open `ios/CoreMLProbe/CoreMLProbe.xcodeproj` in Xcode,
 select a signing team, choose the device, and run the `CoreMLProbe` scheme.

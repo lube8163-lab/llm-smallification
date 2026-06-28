@@ -10,12 +10,18 @@ from pathlib import Path
 
 
 DEFAULT_MODEL_DIR = Path("ios/CoreMLProbe/CoreMLProbe/Models")
-EMBEDDING = "gemma4_12b_embedding_seq4_int4_block32.mlmodelc"
 NORM_LM_HEAD = "gemma4_12b_norm_lm_head_1tok_int4_block32.mlmodelc"
 LEGACY_LM_HEAD = "gemma4_12b_lm_head_1tok_int4_block32.mlmodelc"
-DECODER_RE = re.compile(
-    r"^gemma4_12b_layer(?P<index>\d+)_decoder_seq4_mask_int4_block32\.mlmodelc$"
-)
+
+
+def embedding_name(seq_len: int) -> str:
+    return f"gemma4_12b_embedding_seq{seq_len}_int4_block32.mlmodelc"
+
+
+def decoder_re(seq_len: int) -> re.Pattern[str]:
+    return re.compile(
+        rf"^gemma4_12b_layer(?P<index>\d+)_decoder_seq{seq_len}_mask_int4_block32\.mlmodelc$"
+    )
 
 
 class Reporter:
@@ -64,12 +70,13 @@ def verify_required_bundle(model_dir: Path, name: str, reporter: Reporter) -> bo
     return True
 
 
-def verify_decoders(model_dir: Path, expected_layers: int, reporter: Reporter) -> None:
+def verify_decoders(model_dir: Path, expected_layers: int, seq_len: int, reporter: Reporter) -> None:
     by_index: dict[int, list[str]] = {}
     ignored: list[str] = []
+    pattern = decoder_re(seq_len)
 
-    for path in model_dir.glob("gemma4_12b_layer*_decoder_seq4_mask_int4_block32.mlmodelc"):
-        match = DECODER_RE.match(path.name)
+    for path in model_dir.glob(f"gemma4_12b_layer*_decoder_seq{seq_len}_mask_int4_block32.mlmodelc"):
+        match = pattern.match(path.name)
         if not match:
             ignored.append(path.name)
             continue
@@ -149,6 +156,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("model_dir", nargs="?", default=DEFAULT_MODEL_DIR)
     parser.add_argument("--expected-layers", type=int, default=48)
+    parser.add_argument("--seq-len", type=int, default=4)
     parser.add_argument("--require-norm-lm-head", action="store_true")
     parser.add_argument("--allow-legacy-lm-head", action="store_true")
     parser.add_argument("--fail-on-legacy", action="store_true")
@@ -160,8 +168,8 @@ def main() -> int:
     if not model_dir.is_dir():
         reporter.error(f"missing model directory: {model_dir}")
     else:
-        verify_required_bundle(model_dir, EMBEDDING, reporter)
-        verify_decoders(model_dir, args.expected_layers, reporter)
+        verify_required_bundle(model_dir, embedding_name(args.seq_len), reporter)
+        verify_decoders(model_dir, args.expected_layers, args.seq_len, reporter)
         verify_lm_head(
             model_dir,
             require_norm_lm_head=args.require_norm_lm_head,

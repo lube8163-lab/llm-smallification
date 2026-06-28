@@ -77,6 +77,13 @@ struct ChatScreen: View {
                         LabeledContent("Tokens", value: "\(viewModel.generatedTokenCount)")
                     }
 
+                    Picker("Window", selection: $viewModel.sequenceLength) {
+                        ForEach(ProbeSequenceLength.allCases) { sequenceLength in
+                            Text(sequenceLength.title).tag(sequenceLength)
+                        }
+                    }
+                    .disabled(viewModel.isGenerating)
+
                     TextField("Token window", text: $viewModel.inputIDsText)
                         .keyboardType(.numbersAndPunctuation)
                         .textInputAutocapitalization(.never)
@@ -312,6 +319,13 @@ struct ProbeScreen: View {
                         }
                     }
                     if viewModel.runMode.usesInputIDs {
+                        Picker("Window", selection: $viewModel.sequenceLength) {
+                            ForEach(ProbeSequenceLength.allCases) { sequenceLength in
+                                Text(sequenceLength.title).tag(sequenceLength)
+                            }
+                        }
+                        .disabled(viewModel.isRunning)
+
                         TextField("Input IDs", text: $viewModel.inputIDsText)
                             .keyboardType(.numbersAndPunctuation)
                             .textInputAutocapitalization(.never)
@@ -427,7 +441,13 @@ final class ChatViewModel: ObservableObject {
     @Published var decoderComputeSelection = ProbeComputeSelection.selectedDecoderFromProcess(default: .cpuAndGPU)
     @Published var layerSelection = ProbeLayerSelection.selectedFromProcess(default: .first48)
     @Published var cacheClearPolicy = ProbeCacheClearPolicy.selectedFromProcess(default: .runEndOnly)
-    @Published var inputIDsText = ProbeRunner.selectedInputIDsTextFromProcess()
+    @Published var sequenceLength: ProbeSequenceLength {
+        didSet {
+            guard oldValue != sequenceLength else { return }
+            inputIDsText = ProbeRunner.defaultInputIDsText(sequenceLength: sequenceLength)
+        }
+    }
+    @Published var inputIDsText: String
     @Published var generatedTokenCount = ProbeRunner.selectedGeneratedTokenCountFromProcess()
     @Published var messageText = ""
     @Published var isGenerating = false
@@ -441,6 +461,12 @@ final class ChatViewModel: ObservableObject {
         Array(steps.suffix(16))
     }
 
+    init() {
+        let sequenceLength = ProbeRunner.selectedSequenceLengthFromProcess()
+        self.sequenceLength = sequenceLength
+        self.inputIDsText = ProbeRunner.selectedInputIDsTextFromProcess(sequenceLength: sequenceLength)
+    }
+
     func clear() {
         messages.removeAll()
         steps.removeAll()
@@ -450,7 +476,7 @@ final class ChatViewModel: ObservableObject {
     }
 
     func resetInputWindow() {
-        inputIDsText = ProbeRunner.defaultInputIDsText
+        inputIDsText = ProbeRunner.defaultInputIDsText(sequenceLength: sequenceLength)
         summary = "Input window reset"
         currentMemoryText = ProbeMemory.currentText()
     }
@@ -461,7 +487,11 @@ final class ChatViewModel: ObservableObject {
 
         let resolvedWindow: TokenWindowResolution
         do {
-            resolvedWindow = try Self.resolveTokenWindow(messageText: text, fallbackText: inputIDsText)
+            resolvedWindow = try Self.resolveTokenWindow(
+                messageText: text,
+                fallbackText: inputIDsText,
+                sequenceLength: sequenceLength
+            )
         } catch {
             messageText = ""
             summary = error.localizedDescription
@@ -489,6 +519,7 @@ final class ChatViewModel: ObservableObject {
         let computePlan = ProbeComputePlan(endpoint: endpointComputeSelection, decoder: decoderComputeSelection)
         let layerSelection = layerSelection
         let cacheClearPolicy = cacheClearPolicy
+        let sequenceLength = self.sequenceLength
 
         if resolvedWindow.shouldUpdateInputField {
             self.inputIDsText = inputIDsText
@@ -513,6 +544,7 @@ final class ChatViewModel: ObservableObject {
                     mode: .generateTokenLoop,
                     layerSelection: layerSelection,
                     cacheClearPolicy: cacheClearPolicy,
+                    sequenceLength: sequenceLength,
                     inputIDsText: inputIDsText,
                     generatedTokenCount: generatedTokenCount
                 )
@@ -533,7 +565,11 @@ final class ChatViewModel: ObservableObject {
                     detail: Self.generatedTokenDetail(from: report),
                     isError: false
                 ))
-                if let nextWindow = Self.slidTokenWindow(from: inputIDsText, appending: tokens) {
+                if let nextWindow = Self.slidTokenWindow(
+                    from: inputIDsText,
+                    appending: tokens,
+                    sequenceLength: sequenceLength
+                ) {
                     self.inputIDsText = nextWindow
                 }
             case .failure(let error):
@@ -562,10 +598,14 @@ final class ChatViewModel: ObservableObject {
         report.steps.last(where: { $0.name == "Generated tokens" })?.detail
     }
 
-    private static func slidTokenWindow(from rawWindow: String, appending tokenIDs: [Int]) -> String? {
+    private static func slidTokenWindow(
+        from rawWindow: String,
+        appending tokenIDs: [Int],
+        sequenceLength: ProbeSequenceLength
+    ) -> String? {
         guard !tokenIDs.isEmpty else { return nil }
-        guard var window = try? parseTokenWindow(rawWindow) else { return nil }
-        guard window.count == 4 else { return nil }
+        guard var window = try? parseTokenWindow(rawWindow, sequenceLength: sequenceLength, allowLong: true) else { return nil }
+        guard window.count == sequenceLength.rawValue else { return nil }
 
         for tokenID in tokenIDs {
             guard let value = Int32(exactly: tokenID) else { return nil }
@@ -582,50 +622,65 @@ final class ChatViewModel: ObservableObject {
         let shouldUpdateInputField: Bool
     }
 
-    private static func resolveTokenWindow(messageText: String, fallbackText: String) throws -> TokenWindowResolution {
-        if let ids = try tokenWindowFromMessage(messageText) {
+    private static func resolveTokenWindow(
+        messageText: String,
+        fallbackText: String,
+        sequenceLength: ProbeSequenceLength
+    ) throws -> TokenWindowResolution {
+        if let ids = try tokenWindowFromMessage(messageText, sequenceLength: sequenceLength) {
             let text = formatTokenWindow(ids)
             return TokenWindowResolution(
                 text: text,
-                detail: tokenWindowDetail(text: text, source: "from message IDs", ids: ids),
+                detail: tokenWindowDetail(text: text, source: "from message IDs", ids: ids, sequenceLength: sequenceLength),
                 shouldUpdateInputField: true
             )
         }
 
-        let ids = try parseTokenWindow(fallbackText)
+        let ids = try parseTokenWindow(fallbackText, sequenceLength: sequenceLength, allowLong: false)
         let text = formatTokenWindow(ids)
         return TokenWindowResolution(
             text: text,
             detail: tokenWindowDetail(
                 text: text,
                 source: "from Token window; message text is not tokenized yet",
-                ids: ids
+                ids: ids,
+                sequenceLength: sequenceLength
             ),
             shouldUpdateInputField: false
         )
     }
 
-    private static func tokenWindowDetail(text: String, source: String, ids: [Int32]) -> String {
-        var parts = ["Window \(text)", source]
+    private static func tokenWindowDetail(
+        text: String,
+        source: String,
+        ids: [Int32],
+        sequenceLength: ProbeSequenceLength
+    ) -> String {
+        var parts = ["\(sequenceLength.title) \(text)", source]
         if let repeatedToken = repeatedToken(in: ids) {
             parts.append("repeated #\(repeatedToken)")
         }
         return parts.joined(separator: " | ")
     }
 
-    private static func tokenWindowFromMessage(_ text: String) throws -> [Int32]? {
-        for key in ["input_ids_last4=", "input_ids="] {
+    private static func tokenWindowFromMessage(_ text: String, sequenceLength: ProbeSequenceLength) throws -> [Int32]? {
+        let keys = ["input_ids_last\(sequenceLength.rawValue)=", "input_ids_last4=", "input_ids="]
+        for key in keys {
             if let keyedValue = valueAfterKey(key, in: text) {
-                return try parseTokenWindow(keyedValue)
+                return try parseTokenWindow(
+                    keyedValue,
+                    sequenceLength: sequenceLength,
+                    allowLong: key == "input_ids="
+                )
             }
         }
 
         let hashIDs = tokenIDs(from: text)
-        if hashIDs.count == 4 {
-            return try int32Window(from: hashIDs)
+        if hashIDs.count >= sequenceLength.rawValue {
+            return try int32Window(from: hashIDs, sequenceLength: sequenceLength)
         }
 
-        return try parseBareTokenWindow(text)
+        return try parseBareTokenWindow(text, sequenceLength: sequenceLength)
     }
 
     private static func valueAfterKey(_ key: String, in text: String) -> String? {
@@ -635,7 +690,7 @@ final class ChatViewModel: ObservableObject {
         return line.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func parseBareTokenWindow(_ rawWindow: String) throws -> [Int32]? {
+    private static func parseBareTokenWindow(_ rawWindow: String, sequenceLength: ProbeSequenceLength) throws -> [Int32]? {
         let trimmed = rawWindow.trimmingCharacters(in: .whitespacesAndNewlines)
         let allowed = CharacterSet(charactersIn: "0123456789,#[] \t\r\n")
         guard !trimmed.isEmpty,
@@ -650,13 +705,17 @@ final class ChatViewModel: ObservableObject {
         let values = normalized.split { character in
             character == "," || character.isWhitespace
         }
-        guard values.count == 4 else {
+        guard values.count == sequenceLength.rawValue else {
             return nil
         }
-        return try parseTokenWindow(trimmed)
+        return try parseTokenWindow(trimmed, sequenceLength: sequenceLength, allowLong: false)
     }
 
-    private static func parseTokenWindow(_ rawWindow: String) throws -> [Int32] {
+    private static func parseTokenWindow(
+        _ rawWindow: String,
+        sequenceLength: ProbeSequenceLength,
+        allowLong: Bool
+    ) throws -> [Int32] {
         let normalized = rawWindow
             .replacingOccurrences(of: "#", with: "")
             .replacingOccurrences(of: "[", with: " ")
@@ -666,29 +725,37 @@ final class ChatViewModel: ObservableObject {
                 character == "," || character.isWhitespace
             }
             .map(String.init)
-        guard values.count == 4 else {
-            throw ProbeError.invalidInputIDs("expected exactly 4 token IDs, got \(values.count)")
+        if allowLong {
+            guard values.count >= sequenceLength.rawValue else {
+                throw ProbeError.invalidInputIDs("expected at least \(sequenceLength.rawValue) token IDs, got \(values.count)")
+            }
+        } else {
+            guard values.count == sequenceLength.rawValue else {
+                throw ProbeError.invalidInputIDs("expected exactly \(sequenceLength.rawValue) token IDs, got \(values.count)")
+            }
         }
 
-        return try values.map { value in
+        let parsed = try values.map { value in
             guard let parsed = Int32(value) else {
                 throw ProbeError.invalidInputIDs("not an Int32 token ID: \(value)")
             }
             return parsed
         }
+        return Array(parsed.suffix(sequenceLength.rawValue))
     }
 
-    private static func int32Window(from values: [Int]) throws -> [Int32] {
-        guard values.count == 4 else {
-            throw ProbeError.invalidInputIDs("expected exactly 4 token IDs, got \(values.count)")
+    private static func int32Window(from values: [Int], sequenceLength: ProbeSequenceLength) throws -> [Int32] {
+        guard values.count >= sequenceLength.rawValue else {
+            throw ProbeError.invalidInputIDs("expected at least \(sequenceLength.rawValue) token IDs, got \(values.count)")
         }
 
-        return try values.map { value in
+        let parsed = try values.map { value in
             guard let parsed = Int32(exactly: value) else {
                 throw ProbeError.invalidInputIDs("not an Int32 token ID: \(value)")
             }
             return parsed
         }
+        return Array(parsed.suffix(sequenceLength.rawValue))
     }
 
     private static func formatTokenWindow(_ values: [Int32]) -> String {
@@ -737,13 +804,25 @@ final class ProbeViewModel: ObservableObject {
     @Published var decoderComputeSelection = ProbeComputeSelection.selectedDecoderFromProcess(default: .cpuOnly)
     @Published var layerSelection = ProbeLayerSelection.selectedFromProcess(default: .first8)
     @Published var cacheClearPolicy = ProbeCacheClearPolicy.selectedFromProcess(default: .afterEveryModel)
-    @Published var inputIDsText = ProbeRunner.selectedInputIDsTextFromProcess()
+    @Published var sequenceLength: ProbeSequenceLength {
+        didSet {
+            guard oldValue != sequenceLength else { return }
+            inputIDsText = ProbeRunner.defaultInputIDsText(sequenceLength: sequenceLength)
+        }
+    }
+    @Published var inputIDsText: String
     @Published var generatedTokenCount = ProbeRunner.selectedGeneratedTokenCountFromProcess()
     @Published var isRunning = false
     @Published var steps: [ProbeStep] = []
     @Published var summary = "Idle"
     @Published var currentMemoryText = ProbeMemory.currentText()
     private var didAutoRun = false
+
+    init() {
+        let sequenceLength = ProbeRunner.selectedSequenceLengthFromProcess()
+        self.sequenceLength = sequenceLength
+        self.inputIDsText = ProbeRunner.selectedInputIDsTextFromProcess(sequenceLength: sequenceLength)
+    }
 
     func clear() {
         steps.removeAll()
@@ -768,6 +847,7 @@ final class ProbeViewModel: ObservableObject {
         let runMode = runMode
         let layerSelection = layerSelection
         let cacheClearPolicy = cacheClearPolicy
+        let sequenceLength = self.sequenceLength
         let inputIDsText = inputIDsText
         let generatedTokenCount = generatedTokenCount
         Task {
@@ -777,6 +857,7 @@ final class ProbeViewModel: ObservableObject {
                     mode: runMode,
                     layerSelection: layerSelection,
                     cacheClearPolicy: cacheClearPolicy,
+                    sequenceLength: sequenceLength,
                     inputIDsText: inputIDsText,
                     generatedTokenCount: generatedTokenCount
                 )

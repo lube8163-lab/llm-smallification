@@ -4,6 +4,14 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODEL_DIR="${DST_DIR:-"$ROOT_DIR/ios/CoreMLProbe/CoreMLProbe/Models"}"
 EXPECTED_LAYERS="${EXPECTED_LAYERS:-48}"
+SEQ_LEN="${SEQ_LEN:-4}"
+if [[ -z "${MAX_PEAK_MB:-}" ]]; then
+  if [[ "$SEQ_LEN" -gt 4 ]]; then
+    MAX_PEAK_MB=600
+  else
+    MAX_PEAK_MB=350
+  fi
+fi
 BUILD_DESTINATION="${BUILD_DESTINATION:-generic/platform=iOS}"
 ALLOW_LEGACY_LM_HEAD=0
 SKIP_BUILD="${SKIP_BUILD:-0}"
@@ -22,6 +30,8 @@ Options:
 Environment:
   DST_DIR=PATH            Override the iOS Models directory.
   EXPECTED_LAYERS=N       Expected decoder layer count (default: 48).
+  SEQ_LEN=N               Expected fixed sequence length (default: 4).
+  MAX_PEAK_MB=N           Suggested analyzer peak-memory ceiling (default: 350, or 600 when SEQ_LEN > 4).
   BUILD_DESTINATION=X     Default destination for the iOS build.
   SKIP_BUILD=1            Same as --skip-build.
 
@@ -63,11 +73,13 @@ done
 echo "CoreMLProbe device preflight"
 echo "models: $MODEL_DIR"
 echo "expected decoder layers: $EXPECTED_LAYERS"
+echo "sequence length: $SEQ_LEN"
 
 verify_args=(
   "$ROOT_DIR/scripts/verify_coreml_probe_assets.py"
   "$MODEL_DIR"
   --expected-layers "$EXPECTED_LAYERS"
+  --seq-len "$SEQ_LEN"
 )
 
 if [[ "$ALLOW_LEGACY_LM_HEAD" == "1" ]]; then
@@ -93,9 +105,10 @@ Recommended real-device settings:
   endpoint compute: CPU
   decoder compute:  CPU+GPU
   layers:           First $EXPECTED_LAYERS
+  window:           Seq $SEQ_LEN
   cache:            Run end
   tokens:           8 first, then 16 if peak memory remains stable
 
 After the Xcode run, save the console output and analyze it with:
-  ./scripts/analyze_coreml_probe_log.py <log> --require-norm-lm-head --fail-on-repeat --expect-layers $EXPECTED_LAYERS --min-generated-tokens 8 --max-peak-mb 350
+  ./scripts/analyze_coreml_probe_log.py <log> --require-norm-lm-head --fail-on-repeat --expect-layers $EXPECTED_LAYERS --min-generated-tokens 8 --max-peak-mb $MAX_PEAK_MB
 EOF

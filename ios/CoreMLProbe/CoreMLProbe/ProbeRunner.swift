@@ -93,6 +93,79 @@ struct ProbeComputePlan {
     }
 }
 
+enum ProbeSequenceLength: Int, CaseIterable, Identifiable {
+    case seq4 = 4
+    case seq20 = 20
+
+    var id: Int { rawValue }
+
+    var title: String {
+        "Seq \(rawValue)"
+    }
+
+    var embeddingName: String {
+        "gemma4_12b_embedding_seq\(rawValue)_int4_block32"
+    }
+
+    var decoderName: String {
+        "gemma4_12b_layer0_decoder_seq\(rawValue)_mask_int4_block32"
+    }
+
+    var decoderSuffix: String {
+        "_decoder_seq\(rawValue)_mask_int4_block32"
+    }
+
+    var defaultInputIDs: [Int32] {
+        switch self {
+        case .seq4:
+            [2, 123, 4567, 106]
+        case .seq20:
+            [
+                2, 105, 2364, 107, 85141, 236924, 238906, 237234, 7604, 31600,
+                3335, 106, 107, 105, 4368, 107, 100, 45518, 107, 101
+            ]
+        }
+    }
+
+    static func selectedFromProcess(default fallback: ProbeSequenceLength) -> ProbeSequenceLength {
+        let environment = ProcessInfo.processInfo.environment
+        if let value = environment["COREML_PROBE_SEQ_LEN"], let selection = selection(from: value) {
+            return selection
+        }
+
+        let prefix = "--seq-len="
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(prefix) }) {
+            let value = String(argument.dropFirst(prefix.count))
+            if let selection = selection(from: value) {
+                return selection
+            }
+        }
+        return fallback
+    }
+
+    static func bestAvailable() -> ProbeSequenceLength {
+        if modelExists(named: ProbeSequenceLength.seq20.embeddingName) {
+            return .seq20
+        }
+        return .seq4
+    }
+
+    private static func selection(from value: String) -> ProbeSequenceLength? {
+        if let parsed = Int(value) {
+            return ProbeSequenceLength(rawValue: parsed)
+        }
+        return switch value.lowercased() {
+        case "seq4", "s4": .seq4
+        case "seq20", "s20": .seq20
+        default: nil
+        }
+    }
+
+    private static func modelExists(named name: String) -> Bool {
+        Bundle.main.url(forResource: name, withExtension: "mlmodelc", subdirectory: "Models") != nil
+    }
+}
+
 enum ProbeRunMode: String, CaseIterable, Identifiable {
     case loadEmbedding = "load-embedding"
     case loadDecoder = "load-decoder"
@@ -375,6 +448,15 @@ struct TokenPrediction {
     let logit: Float
 }
 
+struct TokenWindow {
+    var values: [Int32]
+    var positionStart: Int
+
+    var seqLength: Int {
+        values.count
+    }
+}
+
 struct LoadedProbeModel {
     let model: MLModel
     let name: String
@@ -401,23 +483,27 @@ enum ProbeMemory {
 }
 
 enum ProbeRunner {
-    private static let embeddingName = "gemma4_12b_embedding_seq4_int4_block32"
-    private static let decoderName = "gemma4_12b_layer0_decoder_seq4_mask_int4_block32"
     private static let decoderPrefix = "gemma4_12b_layer"
-    private static let decoderSuffix = "_decoder_seq4_mask_int4_block32"
     private static let lmHeadName = "gemma4_12b_norm_lm_head_1tok_int4_block32"
     private static let legacyLMHeadName = "gemma4_12b_lm_head_1tok_int4_block32"
     private static let lmHeadNames = [lmHeadName, legacyLMHeadName]
-    private static let defaultInputIDs: [Int32] = [2, 123, 4567, 106]
     static let defaultGeneratedTokenCount = 2
     static let maxGeneratedTokenCount = 32
 
     static var defaultInputIDsText: String {
-        formatInputIDs(defaultInputIDs)
+        defaultInputIDsText(sequenceLength: .seq4)
     }
 
-    static func selectedInputIDsTextFromProcess() -> String {
-        processInputIDsText() ?? defaultInputIDsText
+    static func defaultInputIDsText(sequenceLength: ProbeSequenceLength) -> String {
+        formatInputIDs(sequenceLength.defaultInputIDs)
+    }
+
+    static func selectedSequenceLengthFromProcess() -> ProbeSequenceLength {
+        ProbeSequenceLength.selectedFromProcess(default: ProbeSequenceLength.bestAvailable())
+    }
+
+    static func selectedInputIDsTextFromProcess(sequenceLength: ProbeSequenceLength) -> String {
+        processInputIDsText() ?? defaultInputIDsText(sequenceLength: sequenceLength)
     }
 
     static func selectedGeneratedTokenCountFromProcess() -> Int {
@@ -434,6 +520,7 @@ enum ProbeRunner {
         mode: ProbeRunMode,
         layerSelection: ProbeLayerSelection,
         cacheClearPolicy: ProbeCacheClearPolicy = .afterEveryModel,
+        sequenceLength: ProbeSequenceLength = selectedSequenceLengthFromProcess(),
         inputIDsText: String? = nil,
         generatedTokenCount: Int? = nil
     ) -> Result<ProbeReport, ProbeFailure> {
@@ -442,6 +529,7 @@ enum ProbeRunner {
             mode: mode,
             layerSelection: layerSelection,
             cacheClearPolicy: cacheClearPolicy,
+            sequenceLength: sequenceLength,
             inputIDsText: inputIDsText,
             generatedTokenCount: generatedTokenCount
         )
@@ -452,14 +540,15 @@ enum ProbeRunner {
         mode: ProbeRunMode,
         layerSelection: ProbeLayerSelection,
         cacheClearPolicy: ProbeCacheClearPolicy = .afterEveryModel,
+        sequenceLength: ProbeSequenceLength = selectedSequenceLengthFromProcess(),
         inputIDsText: String? = nil,
         generatedTokenCount: Int? = nil
     ) -> Result<ProbeReport, ProbeFailure> {
         var steps: [ProbeStep] = []
 
         do {
-            print("[CoreMLProbe] run started compute=\(computePlan.logDetail) mode=\(mode.rawValue) layers=\(layerSelection.rawValue) cache=\(cacheClearPolicy.rawValue)")
-            recordStep("Start", detail: "\(computePlan.logDetail), \(mode.title), \(layerSelection.title), cache=\(cacheClearPolicy.title)", steps: &steps)
+            print("[CoreMLProbe] run started compute=\(computePlan.logDetail) mode=\(mode.rawValue) seq=\(sequenceLength.rawValue) layers=\(layerSelection.rawValue) cache=\(cacheClearPolicy.rawValue)")
+            recordStep("Start", detail: "\(computePlan.logDetail), \(mode.title), \(sequenceLength.title), \(layerSelection.title), cache=\(cacheClearPolicy.title)", steps: &steps)
             clearCoreMLRuntimeCache(reason: "run start", steps: &steps)
             try validateComputePlan(computePlan, mode: mode)
 
@@ -470,17 +559,17 @@ enum ProbeRunner {
             switch mode {
             case .loadEmbedding:
                 try runLoadOnly(
-                    named: embeddingName,
+                    named: sequenceLength.embeddingName,
                     config: endpointConfig,
-                    cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(embeddingName)" : nil,
+                    cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(sequenceLength.embeddingName)" : nil,
                     steps: &steps
                 )
                 summary = "OK: loaded embedding"
             case .loadDecoder:
                 try runLoadOnly(
-                    named: decoderName,
+                    named: sequenceLength.decoderName,
                     config: decoderConfig,
-                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderName),
+                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: sequenceLength.decoderName),
                     steps: &steps
                 )
                 summary = "OK: loaded layer 0"
@@ -493,15 +582,15 @@ enum ProbeRunner {
                 summary = "OK: loaded LM head"
             case .loadAllSequential:
                 try runLoadOnly(
-                    named: embeddingName,
+                    named: sequenceLength.embeddingName,
                     config: endpointConfig,
-                    cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(embeddingName)" : nil,
+                    cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(sequenceLength.embeddingName)" : nil,
                     steps: &steps
                 )
                 try runLoadOnly(
-                    named: decoderName,
+                    named: sequenceLength.decoderName,
                     config: decoderConfig,
-                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderName),
+                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: sequenceLength.decoderName),
                     steps: &steps
                 )
                 try runLoadLMHeadOnly(
@@ -511,7 +600,7 @@ enum ProbeRunner {
                 )
                 summary = "OK: loaded all sequentially"
             case .loadDecoderStack:
-                let plan = try decoderLayerPlan(selection: layerSelection)
+                let plan = try decoderLayerPlan(selection: layerSelection, sequenceLength: sequenceLength)
                 recordStep("Decoder stack", detail: plan.detail, steps: &steps)
                 for (offset, layer) in plan.layers.enumerated() {
                     let layerPosition = offset + 1
@@ -528,25 +617,29 @@ enum ProbeRunner {
                 }
                 summary = "OK: loaded \(plan.layers.count) decoder layers"
             case .embeddingOnly:
-                let inputIDs = try selectedInputIDs(overrideText: inputIDsText)
-                let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+                let inputWindow = try selectedInputWindow(overrideText: inputIDsText, sequenceLength: sequenceLength)
+                let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 summary = "OK: hidden \(hidden.shape)"
             case .decoderOnly:
-                let hidden = try makeHidden(seqLength: 4)
+                let hidden = try makeHidden(seqLength: sequenceLength.rawValue)
                 let decoded = try runDecoder(
-                    layer: DecoderLayerModel(index: 0, name: decoderName),
+                    layer: DecoderLayerModel(index: 0, name: sequenceLength.decoderName),
                     hidden: hidden,
                     config: decoderConfig,
-                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderName),
+                    sequenceLength: sequenceLength,
+                    positionStart: 0,
+                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: sequenceLength.decoderName),
                     steps: &steps
                 )
                 summary = "OK: decoded \(decoded.shape)"
             case .decoderStack:
-                let hidden = try makeHidden(seqLength: 4)
+                let hidden = try makeHidden(seqLength: sequenceLength.rawValue)
                 let decoded = try runDecoderStack(
                     hidden: hidden,
                     config: decoderConfig,
                     layerSelection: layerSelection,
+                    sequenceLength: sequenceLength,
+                    positionStart: 0,
                     cacheClearPolicy: cacheClearPolicy,
                     steps: &steps
                 )
@@ -557,31 +650,35 @@ enum ProbeRunner {
                 recordStep("Top logits", detail: top, steps: &steps)
                 summary = "OK: \(top)"
             case .fullSequential:
-                let inputIDs = try selectedInputIDs(overrideText: inputIDsText)
-                let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+                let inputWindow = try selectedInputWindow(overrideText: inputIDsText, sequenceLength: sequenceLength)
+                let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let decoded = try runDecoder(
-                    layer: DecoderLayerModel(index: 0, name: decoderName),
+                    layer: DecoderLayerModel(index: 0, name: sequenceLength.decoderName),
                     hidden: hidden,
                     config: decoderConfig,
-                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderName),
+                    sequenceLength: sequenceLength,
+                    positionStart: inputWindow.positionStart,
+                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: sequenceLength.decoderName),
                     steps: &steps
                 )
-                let lastHidden = try copyLastToken(from: decoded)
+                let lastHidden = try copyLastToken(from: decoded, sequenceLength: sequenceLength)
                 let logits = try runLMHead(hidden: lastHidden, config: endpointConfig, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let top = topLogitSummary(logits)
                 recordStep("Top logits", detail: top, steps: &steps)
                 summary = "OK: \(top)"
             case .fullStackSequential:
-                let inputIDs = try selectedInputIDs(overrideText: inputIDsText)
-                let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+                let inputWindow = try selectedInputWindow(overrideText: inputIDsText, sequenceLength: sequenceLength)
+                let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let decoded = try runDecoderStack(
                     hidden: hidden,
                     config: decoderConfig,
                     layerSelection: layerSelection,
+                    sequenceLength: sequenceLength,
+                    positionStart: inputWindow.positionStart,
                     cacheClearPolicy: cacheClearPolicy,
                     steps: &steps
                 )
-                let lastHidden = try copyLastToken(from: decoded)
+                let lastHidden = try copyLastToken(from: decoded, sequenceLength: sequenceLength)
                 let logits = try runLMHead(hidden: lastHidden, config: endpointConfig, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let top = topLogitSummary(logits)
                 recordStep("Top logits", detail: top, steps: &steps)
@@ -592,6 +689,7 @@ enum ProbeRunner {
                     decoderConfig: decoderConfig,
                     layerSelection: layerSelection,
                     cacheClearPolicy: cacheClearPolicy,
+                    sequenceLength: sequenceLength,
                     inputIDsText: inputIDsText,
                     steps: &steps
                 )
@@ -602,6 +700,7 @@ enum ProbeRunner {
                     decoderConfig: decoderConfig,
                     layerSelection: layerSelection,
                     cacheClearPolicy: cacheClearPolicy,
+                    sequenceLength: sequenceLength,
                     inputIDsText: inputIDsText,
                     generatedTokenCount: generatedTokenCount,
                     steps: &steps
@@ -694,18 +793,19 @@ enum ProbeRunner {
     private static func runEmbedding(
         config: MLModelConfiguration,
         inputIDs: [Int32],
+        sequenceLength: ProbeSequenceLength,
         cacheClearPolicy: ProbeCacheClearPolicy,
         steps: inout [ProbeStep]
     ) throws -> MLMultiArray {
         recordStep("Prompt IDs", detail: inputIDs.map(String.init).joined(separator: ","), steps: &steps)
 
         let hidden = try autoreleasepool {
-            let embedding = try loadModel(named: embeddingName, config: config, steps: &steps)
+            let embedding = try loadModel(named: sequenceLength.embeddingName, config: config, steps: &steps)
             return try predictEmbedding(model: embedding, inputIDs: inputIDs, name: "Embedding", steps: &steps)
         }
-        recordStep("Released \(embeddingName)", detail: "hidden retained", steps: &steps)
+        recordStep("Released \(sequenceLength.embeddingName)", detail: "hidden retained", steps: &steps)
         if cacheClearPolicy.clearsAfterNonDecoderRelease {
-            clearCoreMLRuntimeCache(reason: "released \(embeddingName)", steps: &steps)
+            clearCoreMLRuntimeCache(reason: "released \(sequenceLength.embeddingName)", steps: &steps)
         }
         return hidden
     }
@@ -715,19 +815,22 @@ enum ProbeRunner {
         decoderConfig: MLModelConfiguration,
         layerSelection: ProbeLayerSelection,
         cacheClearPolicy: ProbeCacheClearPolicy,
+        sequenceLength: ProbeSequenceLength,
         inputIDsText: String?,
         steps: inout [ProbeStep]
     ) throws -> (index: Int, logit: Float) {
-        let inputIDs = try selectedInputIDs(overrideText: inputIDsText)
-        let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputIDs, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+        let inputWindow = try selectedInputWindow(overrideText: inputIDsText, sequenceLength: sequenceLength)
+        let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
         let decoded = try runDecoderStack(
             hidden: hidden,
             config: decoderConfig,
             layerSelection: layerSelection,
+            sequenceLength: sequenceLength,
+            positionStart: inputWindow.positionStart,
             cacheClearPolicy: cacheClearPolicy,
             steps: &steps
         )
-        let lastHidden = try copyLastToken(from: decoded)
+        let lastHidden = try copyLastToken(from: decoded, sequenceLength: sequenceLength)
         let logits = try runLMHead(hidden: lastHidden, config: endpointConfig, cacheClearPolicy: cacheClearPolicy, steps: &steps)
         let token = try topLogit(logits)
         recordStep(
@@ -743,37 +846,42 @@ enum ProbeRunner {
         decoderConfig: MLModelConfiguration,
         layerSelection: ProbeLayerSelection,
         cacheClearPolicy: ProbeCacheClearPolicy,
+        sequenceLength: ProbeSequenceLength,
         inputIDsText: String?,
         generatedTokenCount: Int?,
         steps: inout [ProbeStep]
     ) throws -> [TokenPrediction] {
-        var inputWindow = try selectedInputIDs(overrideText: inputIDsText)
+        var inputWindow = try selectedInputWindow(overrideText: inputIDsText, sequenceLength: sequenceLength)
         let tokenCount = try selectedGeneratedTokenCount(override: generatedTokenCount)
         recordStep(
             "Generation loop",
-            detail: "tokens=\(tokenCount) strategy=reuse embedding+lm-head reload decoder stack cache=\(cacheClearPolicy.rawValue)",
+            detail: "tokens=\(tokenCount) seq=\(sequenceLength.rawValue) strategy=reuse embedding+lm-head reload decoder stack cache=\(cacheClearPolicy.rawValue)",
             steps: &steps
         )
 
         let generationResult = try autoreleasepool { () throws -> (predictions: [TokenPrediction], lmHeadName: String) in
-            let embedding = try loadModel(named: embeddingName, config: endpointConfig, steps: &steps)
+            let embedding = try loadModel(named: sequenceLength.embeddingName, config: endpointConfig, steps: &steps)
             let lmHead = try loadLMHead(config: endpointConfig, steps: &steps)
             var localPredictions: [TokenPrediction] = []
 
             for step in 1...tokenCount {
                 let tokenStart = Date()
                 let prediction = try autoreleasepool { () throws -> TokenPrediction in
-                    recordStep("Prompt IDs \(step)", detail: formatInputIDs(inputWindow), steps: &steps)
-                    if let repeatedToken = repeatedToken(in: inputWindow) {
+                    recordStep(
+                        "Prompt IDs \(step)",
+                        detail: "\(formatInputIDs(inputWindow.values)) positionStart=\(inputWindow.positionStart)",
+                        steps: &steps
+                    )
+                    if let repeatedToken = repeatedToken(in: inputWindow.values) {
                         recordStep(
                             "Repeated input window \(step)",
-                            detail: "#\(repeatedToken) repeated across all 4 positions",
+                            detail: "#\(repeatedToken) repeated across all \(sequenceLength.rawValue) positions",
                             steps: &steps
                         )
                     }
                     let hidden = try predictEmbedding(
                         model: embedding,
-                        inputIDs: inputWindow,
+                        inputIDs: inputWindow.values,
                         name: "Embedding token \(step)",
                         steps: &steps
                     )
@@ -781,10 +889,12 @@ enum ProbeRunner {
                         hidden: hidden,
                         config: decoderConfig,
                         layerSelection: layerSelection,
+                        sequenceLength: sequenceLength,
+                        positionStart: inputWindow.positionStart,
                         cacheClearPolicy: cacheClearPolicy,
                         steps: &steps
                     )
-                    let lastHidden = try copyLastToken(from: decoded)
+                    let lastHidden = try copyLastToken(from: decoded, sequenceLength: sequenceLength)
                     let logits = try predictLMHead(
                         model: lmHead.model,
                         hidden: lastHidden,
@@ -818,8 +928,9 @@ enum ProbeRunner {
                 guard let nextToken = Int32(exactly: prediction.index) else {
                     throw ProbeError.invalidInputIDs("generated token does not fit Int32: \(prediction.index)")
                 }
-                inputWindow.removeFirst()
-                inputWindow.append(nextToken)
+                inputWindow.values.removeFirst()
+                inputWindow.values.append(nextToken)
+                inputWindow.positionStart += 1
                 localPredictions.append(prediction)
             }
 
@@ -827,7 +938,7 @@ enum ProbeRunner {
         }
 
         let predictions = generationResult.predictions
-        recordStep("Released generation endpoints", detail: "\(embeddingName), \(generationResult.lmHeadName)", steps: &steps)
+        recordStep("Released generation endpoints", detail: "\(sequenceLength.embeddingName), \(generationResult.lmHeadName)", steps: &steps)
         if cacheClearPolicy.clearsAfterNonDecoderRelease {
             clearCoreMLRuntimeCache(reason: "released generation endpoints", steps: &steps)
         }
@@ -842,10 +953,12 @@ enum ProbeRunner {
         hidden: MLMultiArray,
         config: MLModelConfiguration,
         layerSelection: ProbeLayerSelection,
+        sequenceLength: ProbeSequenceLength,
+        positionStart: Int,
         cacheClearPolicy: ProbeCacheClearPolicy,
         steps: inout [ProbeStep]
     ) throws -> MLMultiArray {
-        let plan = try decoderLayerPlan(selection: layerSelection)
+        let plan = try decoderLayerPlan(selection: layerSelection, sequenceLength: sequenceLength)
         recordStep("Decoder stack", detail: plan.detail, steps: &steps)
 
         var current = hidden
@@ -855,6 +968,8 @@ enum ProbeRunner {
                 layer: layer,
                 hidden: current,
                 config: config,
+                sequenceLength: sequenceLength,
+                positionStart: positionStart,
                 cacheClearReason: cacheClearPolicy.decoderReleaseReason(
                     layerPosition: layerPosition,
                     totalLayers: plan.layers.count,
@@ -870,13 +985,15 @@ enum ProbeRunner {
         layer: DecoderLayerModel,
         hidden: MLMultiArray,
         config: MLModelConfiguration,
+        sequenceLength: ProbeSequenceLength,
+        positionStart: Int,
         cacheClearReason: String?,
         steps: inout [ProbeStep]
     ) throws -> MLMultiArray {
         let decoded = try autoreleasepool {
             let decoder = try loadModel(named: layer.name, config: config, steps: &steps)
-            let positionIDs = try makePositionIDs()
-            let mask = try makeCausalMask()
+            let positionIDs = try makePositionIDs(seqLength: sequenceLength.rawValue, start: positionStart)
+            let mask = try makeCausalMask(seqLength: sequenceLength.rawValue)
             let output = try timedPrediction(
                 name: "Decoder layer \(layer.index)",
                 model: decoder,
@@ -896,18 +1013,18 @@ enum ProbeRunner {
         return decoded
     }
 
-    private static func decoderLayerPlan(selection: ProbeLayerSelection) throws -> DecoderLayerPlan {
+    private static func decoderLayerPlan(selection: ProbeLayerSelection, sequenceLength: ProbeSequenceLength) throws -> DecoderLayerPlan {
         var byIndex: [Int: DecoderLayerModel] = [:]
         let urls = Bundle.main.urls(forResourcesWithExtension: "mlmodelc", subdirectory: "Models") ?? []
 
         for url in urls {
             let name = url.deletingPathExtension().lastPathComponent
-            guard name.hasPrefix(decoderPrefix), name.hasSuffix(decoderSuffix) else {
+            guard name.hasPrefix(decoderPrefix), name.hasSuffix(sequenceLength.decoderSuffix) else {
                 continue
             }
 
             let start = name.index(name.startIndex, offsetBy: decoderPrefix.count)
-            let end = name.index(name.endIndex, offsetBy: -decoderSuffix.count)
+            let end = name.index(name.endIndex, offsetBy: -sequenceLength.decoderSuffix.count)
             let numberText = String(name[start..<end])
             guard let index = Int(numberText) else {
                 continue
@@ -923,7 +1040,7 @@ enum ProbeRunner {
 
         let layers = byIndex.values.sorted { $0.index < $1.index }
         guard !layers.isEmpty else {
-            throw ProbeError.missingModel("\(decoderPrefix)*\(decoderSuffix).mlmodelc")
+            throw ProbeError.missingModel("\(decoderPrefix)*\(sequenceLength.decoderSuffix).mlmodelc")
         }
 
         let selectedLayers: [DecoderLayerModel]
@@ -1163,22 +1280,50 @@ enum ProbeRunner {
         return array
     }
 
-    private static func selectedInputIDs(overrideText: String?) throws -> [Int32] {
+    private static func selectedInputWindow(
+        overrideText: String?,
+        sequenceLength: ProbeSequenceLength
+    ) throws -> TokenWindow {
         guard let rawValue = cleanedOverride(overrideText) ?? processInputIDsText() else {
-            return defaultInputIDs
+            return TokenWindow(values: sequenceLength.defaultInputIDs, positionStart: 0)
         }
 
-        let values = rawValue.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-        guard values.count == 4 else {
-            throw ProbeError.invalidInputIDs("expected exactly 4 comma-separated token IDs, got \(values.count)")
+        let windowText = tokenWindowText(from: rawValue, sequenceLength: sequenceLength)
+        let normalized = windowText
+            .replacingOccurrences(of: "#", with: "")
+            .replacingOccurrences(of: "[", with: " ")
+            .replacingOccurrences(of: "]", with: " ")
+            .replacingOccurrences(of: ",", with: " ")
+        let values = normalized.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard values.count >= sequenceLength.rawValue else {
+            throw ProbeError.invalidInputIDs("expected at least \(sequenceLength.rawValue) comma-separated token IDs, got \(values.count)")
         }
 
-        return try values.map { value in
+        let parsed = try values.map { value in
             guard let parsed = Int32(value) else {
                 throw ProbeError.invalidInputIDs("not an Int32 token ID: \(value)")
             }
             return parsed
         }
+        let startIndex = parsed.count - sequenceLength.rawValue
+        let window = Array(parsed[startIndex...])
+        return TokenWindow(values: window, positionStart: startIndex)
+    }
+
+    private static func tokenWindowText(from rawValue: String, sequenceLength: ProbeSequenceLength) -> String {
+        let keys = [
+            "input_ids_last\(sequenceLength.rawValue)=",
+            "input_ids=",
+            "input_ids_last4="
+        ]
+        for key in keys {
+            guard let range = rawValue.range(of: key) else {
+                continue
+            }
+            let tail = rawValue[range.upperBound...]
+            return tail.split(whereSeparator: \.isNewline).first.map(String.init) ?? String(tail)
+        }
+        return rawValue
     }
 
     private static func selectedGeneratedTokenCount(override: Int?) throws -> Int {
@@ -1234,11 +1379,11 @@ enum ProbeRunner {
     }
 
     private static func makeInputIDs(values: [Int32]) throws -> MLMultiArray {
-        guard values.count == 4 else {
-            throw ProbeError.invalidInputIDs("expected 4 token IDs, got \(values.count)")
+        guard !values.isEmpty else {
+            throw ProbeError.invalidInputIDs("expected token IDs, got 0")
         }
 
-        let array = try MLMultiArray(shape: [1, 4], dataType: .int32)
+        let array = try MLMultiArray(shape: [1, NSNumber(value: values.count)], dataType: .int32)
         let pointer = array.dataPointer.bindMemory(to: Int32.self, capacity: array.count)
         for index in 0..<values.count {
             pointer[index] = values[index]
@@ -1246,38 +1391,41 @@ enum ProbeRunner {
         return array
     }
 
-    private static func makePositionIDs() throws -> MLMultiArray {
-        let array = try MLMultiArray(shape: [1, 4], dataType: .int32)
+    private static func makePositionIDs(seqLength: Int, start: Int) throws -> MLMultiArray {
+        let array = try MLMultiArray(shape: [1, NSNumber(value: seqLength)], dataType: .int32)
         let pointer = array.dataPointer.bindMemory(to: Int32.self, capacity: array.count)
         for index in 0..<array.count {
-            pointer[index] = Int32(index)
+            pointer[index] = Int32(start + index)
         }
         return array
     }
 
-    private static func makeCausalMask() throws -> MLMultiArray {
-        let array = try MLMultiArray(shape: [1, 1, 4, 4], dataType: .float16)
+    private static func makeCausalMask(seqLength: Int) throws -> MLMultiArray {
+        let array = try MLMultiArray(
+            shape: [1, 1, NSNumber(value: seqLength), NSNumber(value: seqLength)],
+            dataType: .float16
+        )
         let pointer = array.dataPointer.bindMemory(to: Float16.self, capacity: array.count)
         for index in 0..<array.count {
             pointer[index] = 0
         }
-        for row in 0..<4 {
-            for column in 0..<4 where column > row {
-                pointer[row * 4 + column] = Float16(-65504.0)
+        for row in 0..<seqLength {
+            for column in 0..<seqLength where column > row {
+                pointer[row * seqLength + column] = Float16(-65504.0)
             }
         }
         return array
     }
 
-    private static func copyLastToken(from decoded: MLMultiArray) throws -> MLMultiArray {
-        guard decoded.dataType == .float16, decoded.count >= 4 * 3840 else {
+    private static func copyLastToken(from decoded: MLMultiArray, sequenceLength: ProbeSequenceLength) throws -> MLMultiArray {
+        guard decoded.dataType == .float16, decoded.count >= sequenceLength.rawValue * 3840 else {
             throw ProbeError.unexpectedShape("decoder output \(decoded.shape)")
         }
 
         let array = try MLMultiArray(shape: [1, 1, 3840], dataType: .float16)
         let source = decoded.dataPointer.bindMemory(to: Float16.self, capacity: decoded.count)
         let destination = array.dataPointer.bindMemory(to: Float16.self, capacity: array.count)
-        let sourceOffset = 3 * 3840
+        let sourceOffset = (sequenceLength.rawValue - 1) * 3840
         for index in 0..<3840 {
             destination[index] = source[sourceOffset + index]
         }

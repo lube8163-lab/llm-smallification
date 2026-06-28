@@ -9,8 +9,9 @@ if [[ "${1:-}" == "--endpoints-only" ]]; then
 fi
 SRC_DIR="${1:-"$ROOT_DIR/runpod-artifacts/compiled"}"
 DST_DIR="${DST_DIR:-"$ROOT_DIR/ios/CoreMLProbe/CoreMLProbe/Models"}"
+SEQ_LEN="${SEQ_LEN:-4}"
 
-EMBEDDING_MODEL="gemma4_12b_embedding_seq4_int4_block32.mlmodelc"
+EMBEDDING_MODEL="gemma4_12b_embedding_seq${SEQ_LEN}_int4_block32.mlmodelc"
 NORM_LM_HEAD_MODEL="gemma4_12b_norm_lm_head_1tok_int4_block32.mlmodelc"
 LEGACY_LM_HEAD_MODEL="gemma4_12b_lm_head_1tok_int4_block32.mlmodelc"
 MODELS=()
@@ -39,12 +40,12 @@ if [[ "$ENDPOINTS_ONLY" != "1" ]]; then
     DECODER_MODELS+=("$model")
   done < <(
     find "$SRC_DIR" -maxdepth 1 -type d \
-      -name "gemma4_12b_layer*_decoder_seq4_mask_int4_block32.mlmodelc" \
+      -name "gemma4_12b_layer*_decoder_seq${SEQ_LEN}_mask_int4_block32.mlmodelc" \
       -exec basename {} \; | sort
   )
 
   if [[ "${#DECODER_MODELS[@]}" -eq 0 ]]; then
-    echo "missing decoder layers: $SRC_DIR/gemma4_12b_layer*_decoder_seq4_mask_int4_block32.mlmodelc" >&2
+    echo "missing decoder layers: $SRC_DIR/gemma4_12b_layer*_decoder_seq${SEQ_LEN}_mask_int4_block32.mlmodelc" >&2
     exit 1
   fi
 fi
@@ -70,7 +71,7 @@ rm -rf "$DST_DIR/$NORM_LM_HEAD_MODEL" "$DST_DIR/$LEGACY_LM_HEAD_MODEL"
 
 if [[ "$ENDPOINTS_ONLY" != "1" ]]; then
   find "$DST_DIR" -maxdepth 1 -type d \
-    -name "gemma4_12b_layer*_decoder_seq4_mask_int4_block32.mlmodelc" \
+    -name "gemma4_12b_layer*_decoder_seq${SEQ_LEN}_mask_int4_block32.mlmodelc" \
     -exec rm -rf {} +
 fi
 

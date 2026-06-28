@@ -8,6 +8,7 @@ COMPILED_MODE=0
 SKIP_BUILD="${SKIP_BUILD:-0}"
 BUILD_DESTINATION="${BUILD_DESTINATION:-generic/platform=iOS}"
 EXPECTED_LAYERS="${EXPECTED_LAYERS:-48}"
+SEQ_LEN="${SEQ_LEN:-4}"
 MODEL_DIR="${DST_DIR:-"$ROOT_DIR/ios/CoreMLProbe/CoreMLProbe/Models"}"
 
 usage() {
@@ -29,6 +30,7 @@ Environment:
   FORCE=1          Recompile endpoint package by default; set FORCE=0 to keep existing output.
   DST_DIR=PATH     Override the iOS Models directory used for copy/verify.
   EXPECTED_LAYERS  Expected decoder layer count for verification (default: 48).
+  SEQ_LEN          Fixed sequence length to verify/copy when embedding is present.
   SKIP_BUILD=1     Same as --skip-build.
 EOF
 }
@@ -141,9 +143,10 @@ else
   fi
 fi
 
-DST_DIR="$MODEL_DIR" "$ROOT_DIR/scripts/prepare_ios_coreml_probe_assets.sh" --endpoints-only "$COMPILED_DIR"
+SEQ_LEN="$SEQ_LEN" DST_DIR="$MODEL_DIR" "$ROOT_DIR/scripts/prepare_ios_coreml_probe_assets.sh" --endpoints-only "$COMPILED_DIR"
 "$ROOT_DIR/scripts/verify_coreml_probe_assets.py" "$MODEL_DIR" \
   --expected-layers "$EXPECTED_LAYERS" \
+  --seq-len "$SEQ_LEN" \
   --require-norm-lm-head \
   --fail-on-legacy
 

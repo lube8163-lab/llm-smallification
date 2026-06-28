@@ -13,7 +13,10 @@ from pathlib import Path
 
 DEFAULT_OUT_DIR = Path("/workspace/gemma12b/coreml-endpoints-seq4-int4")
 NORM_PACKAGE = "gemma4_12b_norm_lm_head_1tok_int4_block32.mlpackage"
-EMBEDDING_PACKAGE = "gemma4_12b_embedding_seq4_int4_block32.mlpackage"
+
+
+def embedding_package(seq_len: int) -> str:
+    return f"gemma4_12b_embedding_seq{seq_len}_int4_block32.mlpackage"
 
 
 def package_size(path: Path) -> int:
@@ -56,6 +59,7 @@ def create_archive(packages: list[Path], manifest_path: Path, archive_path: Path
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
+    parser.add_argument("--seq-len", type=int, default=4)
     parser.add_argument("--include-embedding", action="store_true")
     parser.add_argument("--manifest", default="SHA256SUMS-endpoints")
     parser.add_argument("--tar-gz", help="optional .tar.gz archive path to create")
@@ -64,7 +68,7 @@ def main() -> int:
     out_dir = Path(args.out_dir)
     required_names = [NORM_PACKAGE]
     if args.include_embedding:
-        required_names.append(EMBEDDING_PACKAGE)
+        required_names.append(embedding_package(args.seq_len))
 
     packages: list[Path] = []
     errors: list[str] = []

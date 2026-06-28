@@ -56,6 +56,29 @@ def parse_generated_tokens(detail: str) -> list[str]:
     return [match.group("token") for match in GENERATED_TOKEN_RE.finditer(detail)]
 
 
+def longest_repeated_run(tokens: list[str]) -> tuple[str, int]:
+    if not tokens:
+        return "", 0
+
+    best_token = tokens[0]
+    best_count = 1
+    current_token = tokens[0]
+    current_count = 1
+
+    for token in tokens[1:]:
+        if token == current_token:
+            current_count += 1
+        else:
+            current_token = token
+            current_count = 1
+
+        if current_count > best_count:
+            best_token = current_token
+            best_count = current_count
+
+    return best_token, best_count
+
+
 def first_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
     return pattern.search(text)
 
@@ -157,6 +180,17 @@ def analyze(text: str, args: argparse.Namespace) -> int:
                 reporter.error(message)
             else:
                 reporter.warn(message)
+
+        repeat_token, repeat_count = longest_repeated_run(tokens)
+        if repeat_count > args.max_repeat_run:
+            message = (
+                f"generated token #{repeat_token} repeated {repeat_count} consecutive times "
+                f"(allowed {args.max_repeat_run})"
+            )
+            if args.fail_on_repeat:
+                reporter.error(message)
+            else:
+                reporter.warn(message)
     elif args.min_generated_tokens is not None:
         reporter.error("generated token summary not found")
     else:
@@ -183,6 +217,7 @@ def main() -> int:
     parser.add_argument("--expect-layers", type=int)
     parser.add_argument("--min-generated-tokens", type=int)
     parser.add_argument("--max-peak-mb", type=float)
+    parser.add_argument("--max-repeat-run", type=int, default=3)
     args = parser.parse_args()
 
     return analyze(read_log(args.log), args)

@@ -68,11 +68,16 @@ def main() -> None:
     parser.add_argument("--prompt")
     parser.add_argument("--decode-ids")
     parser.add_argument(
+        "--window-sizes",
+        default="4,20",
+        help="comma-separated trailing windows to print from input_ids",
+    )
+    parser.add_argument(
         "--chat-template",
         action="store_true",
-        help="include the model chat template; for seq4 probes this often leaves only the assistant prefix in the last4 window",
+        help="include the model chat template; this is the default unless --raw is passed",
     )
-    parser.add_argument("--raw", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--raw", action="store_true", help="tokenize the prompt without the chat template")
     args = parser.parse_args()
 
     if not args.prompt and not args.decode_ids:
@@ -84,11 +89,16 @@ def main() -> None:
         ids = encode_prompt(
             tokenizer,
             args.prompt,
-            use_chat_template=args.chat_template and not args.raw,
+            use_chat_template=not args.raw,
         )
-        window = ids[-4:]
         print("input_ids=" + format_token_ids(ids))
-        print("input_ids_last4=" + format_token_ids(window))
+        for raw_size in args.window_sizes.split(","):
+            raw_size = raw_size.strip()
+            if not raw_size:
+                continue
+            size = int(raw_size)
+            window = ids[-size:]
+            print(f"input_ids_last{size}=" + format_token_ids(window))
 
     if args.decode_ids:
         ids = parse_token_ids(args.decode_ids)

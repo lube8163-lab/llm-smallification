@@ -24,8 +24,8 @@ Use this when continuing in a fresh Codex chat.
   - LM head `.mlmodelc`
   - 48 decoder layer `.mlmodelc` bundles
   - app/model size about `6.8G`
-- RunPod is stopped. The fixed-shape 48-layer probe no longer needs an active
-  pod unless reconversion or tokenizer/reference work is required.
+- RunPod is stopped. The next quality fix requires reconversion of the endpoint
+  LM head package to include final RMSNorm and final logit softcap.
 
 ## Proven results
 
@@ -98,6 +98,16 @@ Use this when continuing in a fresh Codex chat.
 - Log `Prompt IDs`, generated tokens, per-token total time, and peak memory.
 - Log `Top logits token n` and `Repeated input window n` so repeated-token
   collapse is visible in the device console.
+- The app now prefers `gemma4_12b_norm_lm_head_1tok_int4_block32.mlmodelc`
+  for LM head inference. This package should include language-model final
+  RMSNorm, tied lm_head, and Gemma final logit softcap. If it is absent, the app
+  falls back to the older linear-only `gemma4_12b_lm_head_1tok_int4_block32`
+  and logs `LM head fallback`.
+- `scripts/runpod_convert_gemma4_coreml_endpoints.py` converts the fixed-shape
+  embedding package and the corrected norm+lm_head endpoint package on RunPod.
+  After compiling the `.mlpackage` outputs locally, `prepare_ios_coreml_probe_assets.sh`
+  copies the norm+lm_head bundle when present and removes stale legacy/new LM
+  head bundles from the iOS target before copying.
 - `scripts/gemma4_token_helper.py` is a host-side helper for prompt-to-token
   window and generated-ID decode while the app still lacks an on-device
   tokenizer. It depends on `transformers sentencepiece jinja2` and defaults to
@@ -113,11 +123,19 @@ Use this when continuing in a fresh Codex chat.
 
 The best current cache policy for generation is `Run end`, and the best measured
 compute split is endpoint `CPU` with decoder `CPU+GPU`. That combination has
-completed `Tokens = 16` through all 48 layers without crashing.
+completed tokenizer-derived `Tokens = 8` and earlier `Tokens = 16` runs through
+all 48 layers without crashing.
 
-1. Next, test the same split with a tokenizer-derived non-repeated window at
-   `Tokens = 16`, then try `32` if memory stays near the `300-350 MB` range.
-2. Use `scripts/gemma4_token_helper.py --prompt ...` to feed better 4-token
+1. Reconnect RunPod or another CUDA host with the Gemma weights and run:
+   `python scripts/runpod_convert_gemma4_coreml_endpoints.py --target norm-lm-head`.
+   Then compile/copy the resulting
+   `gemma4_12b_norm_lm_head_1tok_int4_block32` package into the iOS target.
+2. Rebuild the app and verify the device log loads
+   `gemma4_12b_norm_lm_head_1tok_int4_block32` with no `LM head fallback`.
+3. Test endpoint `CPU`, decoder `CPU+GPU`, `Layers = First 48`,
+   `Cache = Run end`, tokenizer-derived `Tokens = 8` first, then `16` if peak
+   memory stays near the `300-350 MB` range.
+4. Use `scripts/gemma4_token_helper.py --prompt ...` to feed better 4-token
    windows and `--decode-ids ...` to inspect generated IDs; the current default
    window tends to collapse to repeated `#253027`.
    - Latest 16-token iPhone test showed run 1 sliding from `2,123,4567,106` to
@@ -125,9 +143,13 @@ completed `Tokens = 16` through all 48 layers without crashing.
      repeated window. At that point top logits are identical and argmax remains
      `#253027`, so natural-language composer text cannot affect output until a
      real token window is provided.
-3. If probing more accelerator behavior, keep endpoint `CPU` and test decoder
+   - A later tokenizer-derived test with `237234,7604,31600,3335` confirmed the
+     app used the pasted window, but it still collapsed to `#253027` by token 5.
+     Inspection of the shipped LM head MIL showed it was linear-only, so the
+     next fix is the norm+lm_head endpoint package above.
+5. If probing more accelerator behavior, keep endpoint `CPU` and test decoder
    `All` from small layer counts upward (`First 1`, `8`, `16`, `32`, `48`).
-4. Keep image/audio as a planned attachment surface in the UI, but do not wire
+6. Keep image/audio as a planned attachment surface in the UI, but do not wire
    it to inference until modality embedding/projection packages are converted.
 
 ## Multimodal notes

@@ -375,6 +375,11 @@ struct TokenPrediction {
     let logit: Float
 }
 
+struct LoadedProbeModel {
+    let model: MLModel
+    let name: String
+}
+
 enum ProbeMemory {
     static func currentMB() -> Double {
         var info = task_vm_info_data_t()
@@ -400,7 +405,9 @@ enum ProbeRunner {
     private static let decoderName = "gemma4_12b_layer0_decoder_seq4_mask_int4_block32"
     private static let decoderPrefix = "gemma4_12b_layer"
     private static let decoderSuffix = "_decoder_seq4_mask_int4_block32"
-    private static let lmHeadName = "gemma4_12b_lm_head_1tok_int4_block32"
+    private static let lmHeadName = "gemma4_12b_norm_lm_head_1tok_int4_block32"
+    private static let legacyLMHeadName = "gemma4_12b_lm_head_1tok_int4_block32"
+    private static let lmHeadNames = [lmHeadName, legacyLMHeadName]
     private static let defaultInputIDs: [Int32] = [2, 123, 4567, 106]
     static let defaultGeneratedTokenCount = 2
     static let maxGeneratedTokenCount = 32
@@ -478,10 +485,9 @@ enum ProbeRunner {
                 )
                 summary = "OK: loaded layer 0"
             case .loadLMHead:
-                try runLoadOnly(
-                    named: lmHeadName,
+                try runLoadLMHeadOnly(
                     config: endpointConfig,
-                    cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(lmHeadName)" : nil,
+                    cacheClearPolicy: cacheClearPolicy,
                     steps: &steps
                 )
                 summary = "OK: loaded LM head"
@@ -498,10 +504,9 @@ enum ProbeRunner {
                     cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderName),
                     steps: &steps
                 )
-                try runLoadOnly(
-                    named: lmHeadName,
+                try runLoadLMHeadOnly(
                     config: endpointConfig,
-                    cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(lmHeadName)" : nil,
+                    cacheClearPolicy: cacheClearPolicy,
                     steps: &steps
                 )
                 summary = "OK: loaded all sequentially"
@@ -670,6 +675,22 @@ enum ProbeRunner {
         }
     }
 
+    private static func runLoadLMHeadOnly(
+        config: MLModelConfiguration,
+        cacheClearPolicy: ProbeCacheClearPolicy,
+        steps: inout [ProbeStep]
+    ) throws {
+        let loadedName = try autoreleasepool {
+            let loaded = try loadLMHead(config: config, steps: &steps)
+            recordStep("Loaded \(loaded.name)", detail: "leaving autorelease scope", steps: &steps)
+            return loaded.name
+        }
+        recordStep("Released \(loadedName)", detail: "ARC scope exited", steps: &steps)
+        if cacheClearPolicy.clearsAfterNonDecoderRelease {
+            clearCoreMLRuntimeCache(reason: "released \(loadedName)", steps: &steps)
+        }
+    }
+
     private static func runEmbedding(
         config: MLModelConfiguration,
         inputIDs: [Int32],
@@ -734,9 +755,9 @@ enum ProbeRunner {
             steps: &steps
         )
 
-        let predictions = try autoreleasepool { () throws -> [TokenPrediction] in
+        let generationResult = try autoreleasepool { () throws -> (predictions: [TokenPrediction], lmHeadName: String) in
             let embedding = try loadModel(named: embeddingName, config: endpointConfig, steps: &steps)
-            let lmHead = try loadModel(named: lmHeadName, config: endpointConfig, steps: &steps)
+            let lmHead = try loadLMHead(config: endpointConfig, steps: &steps)
             var localPredictions: [TokenPrediction] = []
 
             for step in 1...tokenCount {
@@ -765,7 +786,7 @@ enum ProbeRunner {
                     )
                     let lastHidden = try copyLastToken(from: decoded)
                     let logits = try predictLMHead(
-                        model: lmHead,
+                        model: lmHead.model,
                         hidden: lastHidden,
                         name: "LM head token \(step)",
                         steps: &steps
@@ -802,10 +823,11 @@ enum ProbeRunner {
                 localPredictions.append(prediction)
             }
 
-            return localPredictions
+            return (localPredictions, lmHead.name)
         }
 
-        recordStep("Released generation endpoints", detail: "\(embeddingName), \(lmHeadName)", steps: &steps)
+        let predictions = generationResult.predictions
+        recordStep("Released generation endpoints", detail: "\(embeddingName), \(generationResult.lmHeadName)", steps: &steps)
         if cacheClearPolicy.clearsAfterNonDecoderRelease {
             clearCoreMLRuntimeCache(reason: "released generation endpoints", steps: &steps)
         }
@@ -924,15 +946,16 @@ enum ProbeRunner {
         cacheClearPolicy: ProbeCacheClearPolicy,
         steps: inout [ProbeStep]
     ) throws -> MLMultiArray {
-        let logits = try autoreleasepool {
-            let lmHead = try loadModel(named: lmHeadName, config: config, steps: &steps)
-            return try predictLMHead(model: lmHead, hidden: hidden, name: "LM head", steps: &steps)
+        let result = try autoreleasepool { () throws -> (logits: MLMultiArray, name: String) in
+            let lmHead = try loadLMHead(config: config, steps: &steps)
+            let logits = try predictLMHead(model: lmHead.model, hidden: hidden, name: "LM head", steps: &steps)
+            return (logits, lmHead.name)
         }
-        recordStep("Released \(lmHeadName)", detail: "logits retained", steps: &steps)
+        recordStep("Released \(result.name)", detail: "logits retained", steps: &steps)
         if cacheClearPolicy.clearsAfterNonDecoderRelease {
-            clearCoreMLRuntimeCache(reason: "released \(lmHeadName)", steps: &steps)
+            clearCoreMLRuntimeCache(reason: "released \(result.name)", steps: &steps)
         }
-        return logits
+        return result.logits
     }
 
     private static func predictEmbedding(
@@ -1041,11 +1064,46 @@ enum ProbeRunner {
         return "\(parent)/\(url.lastPathComponent)"
     }
 
+    private static func loadLMHead(config: MLModelConfiguration, steps: inout [ProbeStep]) throws -> LoadedProbeModel {
+        for (index, name) in lmHeadNames.enumerated() {
+            guard let url = modelURL(named: name) else {
+                continue
+            }
+
+            if index > 0 {
+                recordStep(
+                    "LM head fallback",
+                    detail: "missing \(lmHeadName); using \(name) without final norm/softcap",
+                    steps: &steps
+                )
+            }
+            return LoadedProbeModel(
+                model: try loadModel(named: name, url: url, config: config, steps: &steps),
+                name: name
+            )
+        }
+
+        throw ProbeError.missingModel(lmHeadNames.joined(separator: " or "))
+    }
+
     private static func loadModel(named name: String, config: MLModelConfiguration, steps: inout [ProbeStep]) throws -> MLModel {
-        guard let url = Bundle.main.url(forResource: name, withExtension: "mlmodelc", subdirectory: "Models") else {
+        guard let url = modelURL(named: name) else {
             throw ProbeError.missingModel(name)
         }
 
+        return try loadModel(named: name, url: url, config: config, steps: &steps)
+    }
+
+    private static func modelURL(named name: String) -> URL? {
+        Bundle.main.url(forResource: name, withExtension: "mlmodelc", subdirectory: "Models")
+    }
+
+    private static func loadModel(
+        named name: String,
+        url: URL,
+        config: MLModelConfiguration,
+        steps: inout [ProbeStep]
+    ) throws -> MLModel {
         let start = Date()
         let model = try MLModel(contentsOf: url, configuration: config)
         appendStep(ProbeStep(

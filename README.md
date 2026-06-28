@@ -113,6 +113,13 @@ IDs; otherwise the current `Token window` field is used and the app shows that
 source in the message detail. If generation collapses to the same token in all 4
 positions, the runner logs `Repeated input window` before continuing.
 
+For generation quality probes, the preferred endpoint is now
+`gemma4_12b_norm_lm_head_1tok_int4_block32.mlmodelc`, produced by
+`scripts/runpod_convert_gemma4_coreml_endpoints.py`. It applies the final
+language-model RMSNorm and Gemma final logit softcap before lm_head. If that
+bundle is not present, the app falls back to the older linear-only
+`gemma4_12b_lm_head_1tok_int4_block32.mlmodelc` and logs `LM head fallback`.
+
 The UI and launch arguments allow separate compute-unit choices for the large
 decoder packages and the endpoint packages (embedding and LM head). Use
 `COREML_PROBE_DECODER_COMPUTE` / `--decoder-compute=` and

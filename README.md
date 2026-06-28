@@ -54,7 +54,8 @@ When updating only the corrected generation endpoint, compile the endpoint
 package into a small temporary output directory and copy just that bundle:
 
 ```bash
-./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir>
+python scripts/package_runpod_coreml_endpoint.py --tar-gz /workspace/gemma12b/gemma4-norm-lm-head-endpoint.tar.gz
+./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-or-dir>
 ```
 
 Then build the probe app for a simulator:

@@ -108,6 +108,9 @@ Use this when continuing in a fresh Codex chat.
   After compiling the `.mlpackage` outputs locally, `prepare_ios_coreml_probe_assets.sh`
   copies the norm+lm_head bundle when present and removes stale legacy/new LM
   head bundles from the iOS target before copying.
+- `scripts/package_runpod_coreml_endpoint.py` can run on RunPod after endpoint
+  conversion to verify the expected `.mlpackage`, write SHA256 sums, and
+  optionally create a transfer `.tar.gz`.
 - For the norm+lm_head-only update, use
   `prepare_ios_coreml_probe_assets.sh --endpoints-only <compiled-endpoint-dir>`;
   this replaces endpoint bundles without requiring or touching the existing
@@ -115,7 +118,7 @@ Use this when continuing in a fresh Codex chat.
 - `scripts/verify_coreml_probe_assets.py` checks the staged iOS model bundles.
   Use `--allow-legacy-lm-head` for the current known legacy state, and use
   `--require-norm-lm-head --fail-on-legacy` after the endpoint refresh.
-- `scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir>` runs the
+- `scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-or-dir>` runs the
   local endpoint refresh flow: compile the norm+lm_head package, copy only
   endpoint bundles, verify strict asset state, then build for generic iOS.
 - `scripts/gemma4_token_helper.py` is a host-side helper for prompt-to-token
@@ -138,7 +141,9 @@ all 48 layers without crashing.
 
 1. Reconnect RunPod or another CUDA host with the Gemma weights and run:
    `python scripts/runpod_convert_gemma4_coreml_endpoints.py --target norm-lm-head`.
-   Then run `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir>`
+   Then verify/package the output on RunPod with
+   `python scripts/package_runpod_coreml_endpoint.py --tar-gz /workspace/gemma12b/gemma4-norm-lm-head-endpoint.tar.gz`.
+   Then run `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-or-dir>`
    on the Mac to compile, copy, verify, and build.
 2. Verify the device log loads
    `gemma4_12b_norm_lm_head_1tok_int4_block32` with no `LM head fallback`.

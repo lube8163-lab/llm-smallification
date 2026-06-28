@@ -180,10 +180,15 @@ Decoder layers 08-15 were copied to the Mac, compiled with
 LM head, and the first 16 decoder layers.
 
 For later endpoint-only refreshes such as the corrected norm+lm_head package,
-compile into a separate local output directory and copy only endpoint bundles:
+verify/package on RunPod, then compile into a separate local output directory
+and copy only endpoint bundles:
 
 ```bash
-./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir>
+python scripts/package_runpod_coreml_endpoint.py --tar-gz /workspace/gemma12b/gemma4-norm-lm-head-endpoint.tar.gz
+```
+
+```bash
+./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-or-dir>
 ```
 
 The wrapper runs the equivalent lower-level steps:

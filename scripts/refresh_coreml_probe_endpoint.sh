@@ -14,7 +14,9 @@ usage() {
   cat <<'EOF'
 Usage:
   refresh_coreml_probe_endpoint.sh [options] <endpoint-mlpackage-dir> [compiled-output-dir]
+  refresh_coreml_probe_endpoint.sh [options] <gemma4_12b_norm_lm_head_1tok_int4_block32.mlpackage> [compiled-output-dir]
   refresh_coreml_probe_endpoint.sh --compiled [options] <compiled-endpoint-dir>
+  refresh_coreml_probe_endpoint.sh --compiled [options] <gemma4_12b_norm_lm_head_1tok_int4_block32.mlmodelc>
 
 Options:
   --compiled       Treat the input directory as already compiled .mlmodelc bundles.
@@ -23,7 +25,7 @@ Options:
   -h, --help       Show this help.
 
 Environment:
-  FORCE=0          Keep existing compiled output when compiling from .mlpackage.
+  FORCE=1          Recompile endpoint package by default; set FORCE=0 to keep existing output.
   DST_DIR=PATH     Override the iOS Models directory used for copy/verify.
   EXPECTED_LAYERS  Expected decoder layer count for verification (default: 48).
   SKIP_BUILD=1     Same as --skip-build.
@@ -86,12 +88,19 @@ if [[ ! -d "$INPUT_DIR" ]]; then
 fi
 
 if [[ "$COMPILED_MODE" == "1" ]]; then
-  COMPILED_DIR="$INPUT_DIR"
+  if [[ "$(basename "$INPUT_DIR")" == "$NORM_COMPILED" ]]; then
+    COMPILED_DIR="$(dirname "$INPUT_DIR")"
+  else
+    COMPILED_DIR="$INPUT_DIR"
+  fi
   if [[ ! -d "$COMPILED_DIR/$NORM_COMPILED" ]]; then
     echo "missing compiled norm LM head: $COMPILED_DIR/$NORM_COMPILED" >&2
     exit 1
   fi
 else
+  if [[ "$(basename "$INPUT_DIR")" == "$NORM_PACKAGE" ]]; then
+    INPUT_DIR="$(dirname "$INPUT_DIR")"
+  fi
   if [[ ! -d "$INPUT_DIR/$NORM_PACKAGE" ]]; then
     echo "missing norm LM head package: $INPUT_DIR/$NORM_PACKAGE" >&2
     exit 1

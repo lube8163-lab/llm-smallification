@@ -108,6 +108,10 @@ Use this when continuing in a fresh Codex chat.
   After compiling the `.mlpackage` outputs locally, `prepare_ios_coreml_probe_assets.sh`
   copies the norm+lm_head bundle when present and removes stale legacy/new LM
   head bundles from the iOS target before copying.
+- For the norm+lm_head-only update, use
+  `prepare_ios_coreml_probe_assets.sh --endpoints-only <compiled-endpoint-dir>`;
+  this replaces endpoint bundles without requiring or touching the existing
+  decoder layer bundles in `ios/CoreMLProbe/CoreMLProbe/Models`.
 - `scripts/gemma4_token_helper.py` is a host-side helper for prompt-to-token
   window and generated-ID decode while the app still lacks an on-device
   tokenizer. It depends on `transformers sentencepiece jinja2` and defaults to
@@ -128,8 +132,10 @@ all 48 layers without crashing.
 
 1. Reconnect RunPod or another CUDA host with the Gemma weights and run:
    `python scripts/runpod_convert_gemma4_coreml_endpoints.py --target norm-lm-head`.
-   Then compile/copy the resulting
-   `gemma4_12b_norm_lm_head_1tok_int4_block32` package into the iOS target.
+   Then compile/copy the resulting endpoint package into the iOS target:
+   `./scripts/compile_coreml_probe_packages.sh <endpoint-mlpackage-dir> runpod-artifacts/compiled-endpoints`
+   and
+   `./scripts/prepare_ios_coreml_probe_assets.sh --endpoints-only runpod-artifacts/compiled-endpoints`.
 2. Rebuild the app and verify the device log loads
    `gemma4_12b_norm_lm_head_1tok_int4_block32` with no `LM head fallback`.
 3. Test endpoint `CPU`, decoder `CPU+GPU`, `Layers = First 48`,

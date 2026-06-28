@@ -2,13 +2,18 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENDPOINTS_ONLY=0
+if [[ "${1:-}" == "--endpoints-only" ]]; then
+  ENDPOINTS_ONLY=1
+  shift
+fi
 SRC_DIR="${1:-"$ROOT_DIR/runpod-artifacts/compiled"}"
-DST_DIR="$ROOT_DIR/ios/CoreMLProbe/CoreMLProbe/Models"
+DST_DIR="${DST_DIR:-"$ROOT_DIR/ios/CoreMLProbe/CoreMLProbe/Models"}"
 
 EMBEDDING_MODEL="gemma4_12b_embedding_seq4_int4_block32.mlmodelc"
 NORM_LM_HEAD_MODEL="gemma4_12b_norm_lm_head_1tok_int4_block32.mlmodelc"
 LEGACY_LM_HEAD_MODEL="gemma4_12b_lm_head_1tok_int4_block32.mlmodelc"
-MODELS=("$EMBEDDING_MODEL")
+MODELS=()
 
 clear_packaging_xattrs() {
   local target="$1"
@@ -24,18 +29,24 @@ clear_packaging_xattrs() {
 
 mkdir -p "$DST_DIR"
 
-DECODER_MODELS=()
-while IFS= read -r model; do
-  DECODER_MODELS+=("$model")
-done < <(
-  find "$SRC_DIR" -maxdepth 1 -type d \
-    -name "gemma4_12b_layer*_decoder_seq4_mask_int4_block32.mlmodelc" \
-    -exec basename {} \; | sort
-)
+if [[ "$ENDPOINTS_ONLY" != "1" || -d "$SRC_DIR/$EMBEDDING_MODEL" ]]; then
+  MODELS+=("$EMBEDDING_MODEL")
+fi
 
-if [[ "${#DECODER_MODELS[@]}" -eq 0 ]]; then
-  echo "missing decoder layers: $SRC_DIR/gemma4_12b_layer*_decoder_seq4_mask_int4_block32.mlmodelc" >&2
-  exit 1
+DECODER_MODELS=()
+if [[ "$ENDPOINTS_ONLY" != "1" ]]; then
+  while IFS= read -r model; do
+    DECODER_MODELS+=("$model")
+  done < <(
+    find "$SRC_DIR" -maxdepth 1 -type d \
+      -name "gemma4_12b_layer*_decoder_seq4_mask_int4_block32.mlmodelc" \
+      -exec basename {} \; | sort
+  )
+
+  if [[ "${#DECODER_MODELS[@]}" -eq 0 ]]; then
+    echo "missing decoder layers: $SRC_DIR/gemma4_12b_layer*_decoder_seq4_mask_int4_block32.mlmodelc" >&2
+    exit 1
+  fi
 fi
 
 if [[ -d "$SRC_DIR/$NORM_LM_HEAD_MODEL" ]]; then
@@ -57,11 +68,23 @@ done
 
 rm -rf "$DST_DIR/$NORM_LM_HEAD_MODEL" "$DST_DIR/$LEGACY_LM_HEAD_MODEL"
 
-find "$DST_DIR" -maxdepth 1 -type d \
-  -name "gemma4_12b_layer*_decoder_seq4_mask_int4_block32.mlmodelc" \
-  -exec rm -rf {} +
+if [[ "$ENDPOINTS_ONLY" != "1" ]]; then
+  find "$DST_DIR" -maxdepth 1 -type d \
+    -name "gemma4_12b_layer*_decoder_seq4_mask_int4_block32.mlmodelc" \
+    -exec rm -rf {} +
+fi
 
-for model in "${MODELS[@]}" "${DECODER_MODELS[@]}"; do
+COPY_MODELS=()
+for model in "${MODELS[@]}"; do
+  COPY_MODELS+=("$model")
+done
+if [[ "${#DECODER_MODELS[@]}" -gt 0 ]]; then
+  for model in "${DECODER_MODELS[@]}"; do
+    COPY_MODELS+=("$model")
+  done
+fi
+
+for model in "${COPY_MODELS[@]}"; do
   rm -rf "$DST_DIR/$model"
   ditto --norsrc --noextattr "$SRC_DIR/$model" "$DST_DIR/$model"
   clear_packaging_xattrs "$DST_DIR/$model"
@@ -70,4 +93,8 @@ done
 
 clear_packaging_xattrs "$DST_DIR"
 
-echo "copied $((${#MODELS[@]} + ${#DECODER_MODELS[@]})) model bundles into $DST_DIR"
+if [[ "$ENDPOINTS_ONLY" == "1" ]]; then
+  echo "updated ${#COPY_MODELS[@]} endpoint model bundles in $DST_DIR"
+else
+  echo "copied ${#COPY_MODELS[@]} model bundles into $DST_DIR"
+fi

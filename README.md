@@ -50,6 +50,14 @@ After copying selected compiled Core ML bundles from RunPod into
 ./scripts/prepare_ios_coreml_probe_assets.sh
 ```
 
+When updating only the corrected generation endpoint, compile the endpoint
+package into a small temporary output directory and copy just that bundle:
+
+```bash
+./scripts/compile_coreml_probe_packages.sh <endpoint-mlpackage-dir> runpod-artifacts/compiled-endpoints
+./scripts/prepare_ios_coreml_probe_assets.sh --endpoints-only runpod-artifacts/compiled-endpoints
+```
+
 Then build the probe app for a simulator:
 
 ```bash

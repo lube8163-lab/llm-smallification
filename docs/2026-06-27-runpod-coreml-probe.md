@@ -179,6 +179,14 @@ Decoder layers 08-15 were copied to the Mac, compiled with
 `prepare_ios_coreml_probe_assets.sh`. The probe app now contains embedding,
 LM head, and the first 16 decoder layers.
 
+For later endpoint-only refreshes such as the corrected norm+lm_head package,
+compile into a separate local output directory and copy only endpoint bundles:
+
+```bash
+./scripts/compile_coreml_probe_packages.sh <endpoint-mlpackage-dir> runpod-artifacts/compiled-endpoints
+./scripts/prepare_ios_coreml_probe_assets.sh --endpoints-only runpod-artifacts/compiled-endpoints
+```
+
 | Artifact | Size / count |
 | --- | ---: |
 | `ios/CoreMLProbe/CoreMLProbe/Models` | about `3.0G` |

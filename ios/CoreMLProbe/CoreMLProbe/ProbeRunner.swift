@@ -765,6 +765,11 @@ enum ProbeRunner {
                     )
                     let token = try topLogit(logits)
                     recordStep(
+                        "Top logits token \(step)",
+                        detail: topLogitsSummary(logits, count: 5),
+                        steps: &steps
+                    )
+                    recordStep(
                         "Generated token \(step)",
                         detail: "#\(token.index) logit=\(String(format: "%.3f", token.logit))",
                         steps: &steps
@@ -1208,22 +1213,39 @@ enum ProbeRunner {
         return "#\(token.index) \(String(format: "%.3f", token.logit))"
     }
 
+    private static func topLogitsSummary(_ logits: MLMultiArray, count: Int) -> String {
+        guard let tokens = try? topLogits(logits, count: count) else {
+            return "dtype \(logits.dataType.rawValue) shape \(logits.shape)"
+        }
+
+        return tokens
+            .map { "#\($0.index) \(String(format: "%.3f", $0.logit))" }
+            .joined(separator: ", ")
+    }
+
     private static func topLogit(_ logits: MLMultiArray) throws -> (index: Int, logit: Float) {
+        try topLogits(logits, count: 1)[0]
+    }
+
+    private static func topLogits(_ logits: MLMultiArray, count: Int) throws -> [(index: Int, logit: Float)] {
         guard logits.dataType == .float16 else {
             throw ProbeError.unexpectedShape("logits dtype \(logits.dataType.rawValue), shape \(logits.shape)")
         }
 
         let pointer = logits.dataPointer.bindMemory(to: Float16.self, capacity: logits.count)
-        var bestIndex = 0
-        var bestValue = Float(pointer[0])
-        for index in 1..<logits.count {
+        var best: [(index: Int, logit: Float)] = []
+        for index in 0..<logits.count {
             let value = Float(pointer[index])
-            if value > bestValue {
-                bestValue = value
-                bestIndex = index
+            if best.count < count {
+                best.append((index, value))
+                best.sort { $0.logit > $1.logit }
+            } else if let last = best.last, value > last.logit {
+                best.removeLast()
+                best.append((index, value))
+                best.sort { $0.logit > $1.logit }
             }
         }
-        return (bestIndex, bestValue)
+        return best
     }
 }
 

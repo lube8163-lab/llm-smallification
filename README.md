@@ -137,12 +137,16 @@ Until an on-device tokenizer is bundled, use the host helper to convert a prompt
 into the fixed 4-token app window or decode generated IDs:
 
 ```bash
+python3 -m pip install transformers sentencepiece jinja2
 python3 scripts/gemma4_token_helper.py --prompt "Hello"
 python3 scripts/gemma4_token_helper.py --decode-ids 253027,253027
 ```
 
 Copy the helper's `input_ids_last4=...` line into the Chat composer or the
-`Token window` field to make the prompt affect generation.
+`Token window` field to make the prompt affect generation. The helper defaults
+to the raw prompt tokens because a full chat template often leaves only the
+assistant-prefix tokens in the 4-token window; pass `--chat-template` only when
+you explicitly want to inspect that template form.
 
 For an actual iPhone, open `ios/CoreMLProbe/CoreMLProbe.xcodeproj` in Xcode,
 select a signing team, choose the device, and run the `CoreMLProbe` scheme.

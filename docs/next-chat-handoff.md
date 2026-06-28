@@ -24,6 +24,7 @@ Use this prompt to continue in a fresh Codex chat.
 - runner は `Top logits token n` と、4枠が同一IDになった場合の
   `Repeated input window n` もログに出します。
 - `scripts/gemma4_token_helper.py` でホスト側 tokenizer による prompt -> last4 IDs と decode ができます。
+  依存は `transformers sentencepiece jinja2` です。固定4token検証ではchat templateの末尾がassistant prefixに寄りやすいため、helperの既定はraw prompt tokenizationです。
 - Chat本文はまだオンデバイスtokenizerを通っていません。本文に
   `input_ids_last4=...` / `input_ids=...` / `#123 #456 #789 #10` /
   素の4IDを貼った場合だけ、それをモデル入力として採用します。普通の

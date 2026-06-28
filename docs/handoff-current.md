@@ -100,7 +100,9 @@ Use this when continuing in a fresh Codex chat.
   collapse is visible in the device console.
 - `scripts/gemma4_token_helper.py` is a host-side helper for prompt-to-token
   window and generated-ID decode while the app still lacks an on-device
-  tokenizer.
+  tokenizer. It depends on `transformers sentencepiece jinja2` and defaults to
+  raw prompt tokenization, because chat-template last4 often collapses to the
+  assistant-prefix tokens instead of prompt content.
 - A simple app icon exists in `Assets.xcassets/AppIcon.appiconset`.
 - Chat composer text is not tokenized on device yet. It now accepts pasted
   `input_ids_last4=...`, `input_ids=...`, four `#123` IDs, or four raw IDs from

@@ -187,6 +187,10 @@ and copy only endpoint bundles:
 ./scripts/runpod_refresh_gemma4_coreml_endpoint.sh
 ```
 
+This wrapper runs `runpod_preflight_gemma4_coreml_endpoint.sh` before the long
+conversion, so missing dependencies, CUDA visibility issues, model-path errors,
+or low disk space fail early.
+
 ```bash
 ./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>
 ```

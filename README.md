@@ -59,6 +59,10 @@ back to the Mac, then refresh the app-local endpoint:
 ./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>
 ```
 
+The RunPod wrapper runs `runpod_preflight_gemma4_coreml_endpoint.sh` first to
+check the model path, Python dependencies, CUDA visibility, writable output
+paths, and disk space before starting conversion.
+
 Then build the probe app for a simulator:
 
 ```bash

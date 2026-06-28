@@ -10,6 +10,8 @@ BLOCK_SIZE=32
 FORCE_CONVERT=1
 KEEP_FP16=0
 DRY_RUN=0
+SKIP_PREFLIGHT=0
+MIN_FREE_GB=10
 
 usage() {
   cat <<'EOF'
@@ -24,6 +26,8 @@ Options:
   --block-size N     Int4 block size.
   --no-force         Skip conversion when the target package already exists.
   --keep-fp16        Also save fp16 .mlpackage output.
+  --skip-preflight   Skip RunPod environment and model-path checks.
+  --min-free-gb N    Minimum free space expected near the output dir.
   --dry-run          Print commands without executing them.
   -h, --help         Show this help.
 
@@ -75,6 +79,15 @@ while [[ $# -gt 0 ]]; do
       KEEP_FP16=1
       shift
       ;;
+    --skip-preflight)
+      SKIP_PREFLIGHT=1
+      shift
+      ;;
+    --min-free-gb)
+      require_value "$@"
+      MIN_FREE_GB="$2"
+      shift 2
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
@@ -103,6 +116,14 @@ run_cmd() {
 if [[ "$DRY_RUN" != "1" && ! -d "$MODEL_DIR" ]]; then
   echo "missing model dir: $MODEL_DIR" >&2
   exit 1
+fi
+
+if [[ "$SKIP_PREFLIGHT" != "1" ]]; then
+  run_cmd "$ROOT_DIR/scripts/runpod_preflight_gemma4_coreml_endpoint.sh" \
+    --model-dir "$MODEL_DIR" \
+    --out-dir "$OUT_DIR" \
+    --archive "$ARCHIVE" \
+    --min-free-gb "$MIN_FREE_GB"
 fi
 
 convert_args=(

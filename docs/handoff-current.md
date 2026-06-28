@@ -111,7 +111,11 @@ Use this when continuing in a fresh Codex chat.
   head bundles from the iOS target before copying.
 - `scripts/runpod_refresh_gemma4_coreml_endpoint.sh` is the preferred RunPod
   entrypoint for the endpoint quality fix. It converts the corrected norm+lm_head
-  endpoint, writes SHA256 sums, and creates a transfer tarball.
+  endpoint, writes SHA256 sums, and creates a transfer tarball. It now runs
+  `scripts/runpod_preflight_gemma4_coreml_endpoint.sh` first by default.
+- `scripts/runpod_preflight_gemma4_coreml_endpoint.sh` checks the RunPod model
+  path, output/archive writeability, Python dependencies, CUDA visibility, and
+  disk space before the long endpoint conversion starts.
 - `scripts/package_runpod_coreml_endpoint.py` can run on RunPod after endpoint
   conversion to verify the expected `.mlpackage`, write SHA256 sums, and
   optionally create a transfer `.tar.gz`.

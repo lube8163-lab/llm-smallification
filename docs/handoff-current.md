@@ -96,22 +96,33 @@ Use this when continuing in a fresh Codex chat.
   `every-8-layers`, `per-token`, `run-end-only`.
 - Run embedding -> selected decoder layers -> last-token LM head -> argmax.
 - Log `Prompt IDs`, generated tokens, per-token total time, and peak memory.
+- Log `Top logits token n` and `Repeated input window n` so repeated-token
+  collapse is visible in the device console.
 - `scripts/gemma4_token_helper.py` is a host-side helper for prompt-to-token
   window and generated-ID decode while the app still lacks an on-device
   tokenizer.
 - A simple app icon exists in `Assets.xcassets/AppIcon.appiconset`.
+- Chat composer text is not tokenized on device yet. It now accepts pasted
+  `input_ids_last4=...`, `input_ids=...`, four `#123` IDs, or four raw IDs from
+  the message body; otherwise it uses the `Token window` field and labels the
+  message detail as `message text is not tokenized yet`.
 
 ## Recommended next step
 
 The best current cache policy for generation is `Run end`, and the best measured
 compute split is endpoint `CPU` with decoder `CPU+GPU`. That combination has
-completed `Tokens = 8` through all 48 layers without crashing.
+completed `Tokens = 16` through all 48 layers without crashing.
 
-1. Next, test the same split with `Tokens = 16`, then `32` if memory stays near
-   the `300-350 MB` range.
+1. Next, test the same split with a tokenizer-derived non-repeated window at
+   `Tokens = 16`, then try `32` if memory stays near the `300-350 MB` range.
 2. Use `scripts/gemma4_token_helper.py --prompt ...` to feed better 4-token
    windows and `--decode-ids ...` to inspect generated IDs; the current default
    window tends to collapse to repeated `#253027`.
+   - Latest 16-token iPhone test showed run 1 sliding from `2,123,4567,106` to
+     `253027,253027,253027,253027` by token 6, then run 2 starting from that
+     repeated window. At that point top logits are identical and argmax remains
+     `#253027`, so natural-language composer text cannot affect output until a
+     real token window is provided.
 3. If probing more accelerator behavior, keep endpoint `CPU` and test decoder
    `All` from small layer counts upward (`First 1`, `8`, `16`, `32`, `48`).
 4. Keep image/audio as a planned attachment surface in the UI, but do not wire

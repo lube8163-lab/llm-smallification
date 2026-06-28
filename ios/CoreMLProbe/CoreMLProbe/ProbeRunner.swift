@@ -743,6 +743,13 @@ enum ProbeRunner {
                 let tokenStart = Date()
                 let prediction = try autoreleasepool { () throws -> TokenPrediction in
                     recordStep("Prompt IDs \(step)", detail: formatInputIDs(inputWindow), steps: &steps)
+                    if let repeatedToken = repeatedToken(in: inputWindow) {
+                        recordStep(
+                            "Repeated input window \(step)",
+                            detail: "#\(repeatedToken) repeated across all 4 positions",
+                            steps: &steps
+                        )
+                    }
                     let hidden = try predictEmbedding(
                         model: embedding,
                         inputIDs: inputWindow,
@@ -1152,6 +1159,14 @@ enum ProbeRunner {
 
     private static func formatInputIDs(_ inputIDs: [Int32]) -> String {
         inputIDs.map(String.init).joined(separator: ",")
+    }
+
+    private static func repeatedToken(in inputIDs: [Int32]) -> Int32? {
+        guard let first = inputIDs.first,
+              inputIDs.dropFirst().allSatisfy({ $0 == first }) else {
+            return nil
+        }
+        return first
     }
 
     private static func makeInputIDs(values: [Int32]) throws -> MLMultiArray {

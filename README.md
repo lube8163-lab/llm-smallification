@@ -106,6 +106,13 @@ and slides the window for a very short generation loop. It reuses the embedding
 and LM head models across generated tokens, while decoder layers still use the
 safer load/predict/release path.
 
+The Chat tab is a probe wrapper over that fixed token window. Plain message text
+is not tokenized on device yet. To change the model input from the composer,
+paste `input_ids_last4=...`, `input_ids=...`, four `#123`-style IDs, or four raw
+IDs; otherwise the current `Token window` field is used and the app shows that
+source in the message detail. If generation collapses to the same token in all 4
+positions, the runner logs `Repeated input window` before continuing.
+
 The UI and launch arguments allow separate compute-unit choices for the large
 decoder packages and the endpoint packages (embedding and LM head). Use
 `COREML_PROBE_DECODER_COMPUTE` / `--decoder-compute=` and
@@ -133,6 +140,9 @@ into the fixed 4-token app window or decode generated IDs:
 python3 scripts/gemma4_token_helper.py --prompt "Hello"
 python3 scripts/gemma4_token_helper.py --decode-ids 253027,253027
 ```
+
+Copy the helper's `input_ids_last4=...` line into the Chat composer or the
+`Token window` field to make the prompt affect generation.
 
 For an actual iPhone, open `ios/CoreMLProbe/CoreMLProbe.xcodeproj` in Xcode,
 select a signing team, choose the device, and run the `CoreMLProbe` scheme.

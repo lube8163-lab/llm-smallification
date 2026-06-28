@@ -81,6 +81,13 @@ struct ChatScreen: View {
                         .keyboardType(.numbersAndPunctuation)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
+
+                    Button {
+                        viewModel.resetInputWindow()
+                    } label: {
+                        Label("Reset Window", systemImage: "arrow.counterclockwise")
+                    }
+                    .disabled(viewModel.isGenerating)
                 }
 
                 Section("Conversation") {
@@ -442,16 +449,50 @@ final class ChatViewModel: ObservableObject {
         currentMemoryText = ProbeMemory.currentText()
     }
 
+    func resetInputWindow() {
+        inputIDsText = ProbeRunner.defaultInputIDsText
+        summary = "Input window reset"
+        currentMemoryText = ProbeMemory.currentText()
+    }
+
     func send() {
         let text = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !isGenerating else { return }
 
-        let inputIDsText = inputIDsText
+        let resolvedWindow: TokenWindowResolution
+        do {
+            resolvedWindow = try Self.resolveTokenWindow(messageText: text, fallbackText: inputIDsText)
+        } catch {
+            messageText = ""
+            summary = error.localizedDescription
+            generatedTokenText = ""
+            currentMemoryText = ProbeMemory.currentText()
+            messages.append(ChatMessage(
+                role: .user,
+                text: text,
+                tokens: [],
+                detail: nil,
+                isError: false
+            ))
+            messages.append(ChatMessage(
+                role: .assistant,
+                text: "Invalid token window",
+                tokens: [],
+                detail: error.localizedDescription,
+                isError: true
+            ))
+            return
+        }
+
+        let inputIDsText = resolvedWindow.text
         let generatedTokenCount = generatedTokenCount
         let computePlan = ProbeComputePlan(endpoint: endpointComputeSelection, decoder: decoderComputeSelection)
         let layerSelection = layerSelection
         let cacheClearPolicy = cacheClearPolicy
 
+        if resolvedWindow.shouldUpdateInputField {
+            self.inputIDsText = inputIDsText
+        }
         messageText = ""
         isGenerating = true
         summary = "Generating"
@@ -461,7 +502,7 @@ final class ChatViewModel: ObservableObject {
             role: .user,
             text: text,
             tokens: [],
-            detail: "Window \(inputIDsText)",
+            detail: resolvedWindow.detail,
             isError: false
         ))
 
@@ -523,10 +564,7 @@ final class ChatViewModel: ObservableObject {
 
     private static func slidTokenWindow(from rawWindow: String, appending tokenIDs: [Int]) -> String? {
         guard !tokenIDs.isEmpty else { return nil }
-        var window = rawWindow
-            .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .compactMap(Int32.init)
+        guard var window = try? parseTokenWindow(rawWindow) else { return nil }
         guard window.count == 4 else { return nil }
 
         for tokenID in tokenIDs {
@@ -536,6 +574,133 @@ final class ChatViewModel: ObservableObject {
         }
 
         return window.map(String.init).joined(separator: ",")
+    }
+
+    private struct TokenWindowResolution {
+        let text: String
+        let detail: String
+        let shouldUpdateInputField: Bool
+    }
+
+    private static func resolveTokenWindow(messageText: String, fallbackText: String) throws -> TokenWindowResolution {
+        if let ids = try tokenWindowFromMessage(messageText) {
+            let text = formatTokenWindow(ids)
+            return TokenWindowResolution(
+                text: text,
+                detail: tokenWindowDetail(text: text, source: "from message IDs", ids: ids),
+                shouldUpdateInputField: true
+            )
+        }
+
+        let ids = try parseTokenWindow(fallbackText)
+        let text = formatTokenWindow(ids)
+        return TokenWindowResolution(
+            text: text,
+            detail: tokenWindowDetail(
+                text: text,
+                source: "from Token window; message text is not tokenized yet",
+                ids: ids
+            ),
+            shouldUpdateInputField: false
+        )
+    }
+
+    private static func tokenWindowDetail(text: String, source: String, ids: [Int32]) -> String {
+        var parts = ["Window \(text)", source]
+        if let repeatedToken = repeatedToken(in: ids) {
+            parts.append("repeated #\(repeatedToken)")
+        }
+        return parts.joined(separator: " | ")
+    }
+
+    private static func tokenWindowFromMessage(_ text: String) throws -> [Int32]? {
+        for key in ["input_ids_last4=", "input_ids="] {
+            if let keyedValue = valueAfterKey(key, in: text) {
+                return try parseTokenWindow(keyedValue)
+            }
+        }
+
+        let hashIDs = tokenIDs(from: text)
+        if hashIDs.count == 4 {
+            return try int32Window(from: hashIDs)
+        }
+
+        return try parseBareTokenWindow(text)
+    }
+
+    private static func valueAfterKey(_ key: String, in text: String) -> String? {
+        guard let range = text.range(of: key) else { return nil }
+        let remainder = text[range.upperBound...]
+        let line = remainder.split(whereSeparator: \.isNewline).first.map(String.init) ?? String(remainder)
+        return line.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func parseBareTokenWindow(_ rawWindow: String) throws -> [Int32]? {
+        let trimmed = rawWindow.trimmingCharacters(in: .whitespacesAndNewlines)
+        let allowed = CharacterSet(charactersIn: "0123456789,#[] \t\r\n")
+        guard !trimmed.isEmpty,
+              trimmed.unicodeScalars.allSatisfy({ allowed.contains($0) }) else {
+            return nil
+        }
+
+        let normalized = trimmed
+            .replacingOccurrences(of: "#", with: "")
+            .replacingOccurrences(of: "[", with: " ")
+            .replacingOccurrences(of: "]", with: " ")
+        let values = normalized.split { character in
+            character == "," || character.isWhitespace
+        }
+        guard values.count == 4 else {
+            return nil
+        }
+        return try parseTokenWindow(trimmed)
+    }
+
+    private static func parseTokenWindow(_ rawWindow: String) throws -> [Int32] {
+        let normalized = rawWindow
+            .replacingOccurrences(of: "#", with: "")
+            .replacingOccurrences(of: "[", with: " ")
+            .replacingOccurrences(of: "]", with: " ")
+        let values = normalized
+            .split { character in
+                character == "," || character.isWhitespace
+            }
+            .map(String.init)
+        guard values.count == 4 else {
+            throw ProbeError.invalidInputIDs("expected exactly 4 token IDs, got \(values.count)")
+        }
+
+        return try values.map { value in
+            guard let parsed = Int32(value) else {
+                throw ProbeError.invalidInputIDs("not an Int32 token ID: \(value)")
+            }
+            return parsed
+        }
+    }
+
+    private static func int32Window(from values: [Int]) throws -> [Int32] {
+        guard values.count == 4 else {
+            throw ProbeError.invalidInputIDs("expected exactly 4 token IDs, got \(values.count)")
+        }
+
+        return try values.map { value in
+            guard let parsed = Int32(exactly: value) else {
+                throw ProbeError.invalidInputIDs("not an Int32 token ID: \(value)")
+            }
+            return parsed
+        }
+    }
+
+    private static func formatTokenWindow(_ values: [Int32]) -> String {
+        values.map(String.init).joined(separator: ",")
+    }
+
+    private static func repeatedToken(in values: [Int32]) -> Int32? {
+        guard let first = values.first,
+              values.dropFirst().allSatisfy({ $0 == first }) else {
+            return nil
+        }
+        return first
     }
 
     private static func tokenIDs(from text: String) -> [Int] {

@@ -185,6 +185,7 @@ compile into a separate local output directory and copy only endpoint bundles:
 ```bash
 ./scripts/compile_coreml_probe_packages.sh <endpoint-mlpackage-dir> runpod-artifacts/compiled-endpoints
 ./scripts/prepare_ios_coreml_probe_assets.sh --endpoints-only runpod-artifacts/compiled-endpoints
+./scripts/verify_coreml_probe_assets.py --require-norm-lm-head --fail-on-legacy
 ```
 
 | Artifact | Size / count |

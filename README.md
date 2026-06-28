@@ -55,6 +55,7 @@ conversion/package wrapper, transfer the resulting endpoint package or archive
 back to the Mac, then refresh the app-local endpoint:
 
 ```bash
+./scripts/setup_runpod_coreml_endpoint_env.sh
 ./scripts/runpod_refresh_gemma4_coreml_endpoint.sh
 ./scripts/import_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>
 ```

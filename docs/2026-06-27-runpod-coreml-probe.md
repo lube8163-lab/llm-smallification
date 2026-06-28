@@ -184,6 +184,7 @@ verify/package on RunPod, then compile into a separate local output directory
 and copy only endpoint bundles:
 
 ```bash
+./scripts/setup_runpod_coreml_endpoint_env.sh
 ./scripts/runpod_refresh_gemma4_coreml_endpoint.sh
 ```
 

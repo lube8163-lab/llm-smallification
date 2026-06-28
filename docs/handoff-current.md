@@ -116,6 +116,10 @@ Use this when continuing in a fresh Codex chat.
 - `scripts/runpod_preflight_gemma4_coreml_endpoint.sh` checks the RunPod model
   path, output/archive writeability, Python dependencies, CUDA visibility, and
   disk space before the long endpoint conversion starts.
+- `scripts/setup_runpod_coreml_endpoint_env.sh` installs the RunPod-side Python
+  conversion dependencies without replacing torch by default. Use
+  `--install-torch --torch-index-url ...` only when the RunPod image lacks a
+  CUDA-enabled torch install.
 - `scripts/package_runpod_coreml_endpoint.py` can run on RunPod after endpoint
   conversion to verify the expected `.mlpackage`, write SHA256 sums, and
   optionally create a transfer `.tar.gz`.
@@ -160,6 +164,8 @@ completed tokenizer-derived `Tokens = 8` and earlier `Tokens = 16` runs through
 all 48 layers without crashing.
 
 1. Reconnect RunPod or another CUDA host with the Gemma weights and run:
+   `./scripts/setup_runpod_coreml_endpoint_env.sh` if the Python environment is
+   not already prepared. Then run
    `./scripts/runpod_refresh_gemma4_coreml_endpoint.sh`.
    Then run `./scripts/import_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>`
    on the Mac to compile, copy, verify, preflight, and build.

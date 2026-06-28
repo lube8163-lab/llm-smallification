@@ -33,6 +33,8 @@ Use this prompt to continue in a fresh Codex chat.
 - `scripts/runpod_refresh_gemma4_coreml_endpoint.sh` はRunPod側の推奨入口です。
   実行前に `scripts/runpod_preflight_gemma4_coreml_endpoint.sh` でモデルパス、
   依存、CUDA、出力先、空き容量を確認してから変換します。
+- `scripts/setup_runpod_coreml_endpoint_env.sh` はRunPod側のPython依存を入れる補助です。
+  既存のCUDA対応torchを壊さないよう、既定ではtorchを再インストールしません。
 - `scripts/gemma4_token_helper.py` でホスト側 tokenizer による prompt -> last4 IDs と decode ができます。
   依存は `transformers sentencepiece jinja2` です。固定4token検証ではchat templateの末尾がassistant prefixに寄りやすいため、helperの既定はraw prompt tokenizationです。
 - `scripts/analyze_coreml_probe_log.py` でXcodeログを解析できます。新endpoint必須、fallback禁止、同一token検出、layer数、生成token数、peak memory上限をチェックできます。
@@ -91,7 +93,7 @@ Use this prompt to continue in a fresh Codex chat.
 
 1. まず `git status --short` を確認してください。
 2. `docs/handoff-current.md` と `docs/2026-06-27-runpod-coreml-probe.md` を読んでください。
-3. RunPod側で `./scripts/runpod_refresh_gemma4_coreml_endpoint.sh` を実行し、新しい `gemma4_12b_norm_lm_head_1tok_int4_block32.mlpackage` と転送用tarballを作ってください。preflightが先に走ります。
+3. RunPod側で必要なら `./scripts/setup_runpod_coreml_endpoint_env.sh` を実行してください。その後 `./scripts/runpod_refresh_gemma4_coreml_endpoint.sh` を実行し、新しい `gemma4_12b_norm_lm_head_1tok_int4_block32.mlpackage` と転送用tarballを作ってください。preflightが先に走ります。
 4. 生成物または `/workspace/gemma12b/gemma4-norm-lm-head-endpoint.tar.gz` をMacへコピーしてください。
 5. Mac側で `./scripts/import_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>` を実行してください。`.tar.gz` をそのまま渡せます。これでcompile、endpoint-only copy、strict verify、preflight、generic iOS buildまで一括で走ります。
 6. 分割したい場合だけ `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>` の後に `./scripts/preflight_coreml_probe_device.sh` を実行してください。

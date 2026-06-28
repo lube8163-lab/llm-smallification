@@ -185,7 +185,7 @@ import sys
 allow_no_cuda = sys.argv[1] == "1"
 errors = 0
 
-for name in ("numpy", "torch", "transformers", "coremltools"):
+for name in ("numpy", "torch", "transformers", "accelerate", "safetensors", "coremltools"):
     try:
         module = importlib.import_module(name)
         version = getattr(module, "__version__", "unknown")

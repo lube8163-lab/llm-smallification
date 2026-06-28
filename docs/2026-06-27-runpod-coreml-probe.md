@@ -192,15 +192,16 @@ conversion, so missing dependencies, CUDA visibility issues, model-path errors,
 or low disk space fail early.
 
 ```bash
-./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>
+./scripts/import_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>
 ```
 
-The wrapper runs the equivalent lower-level steps:
+The Mac-side one-shot runs the equivalent lower-level steps:
 
 ```bash
 ./scripts/compile_coreml_probe_packages.sh <endpoint-mlpackage-dir> runpod-artifacts/compiled-endpoints
 ./scripts/prepare_ios_coreml_probe_assets.sh --endpoints-only runpod-artifacts/compiled-endpoints
 ./scripts/verify_coreml_probe_assets.py --require-norm-lm-head --fail-on-legacy
+./scripts/preflight_coreml_probe_device.sh
 ```
 
 | Artifact | Size / count |

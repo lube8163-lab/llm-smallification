@@ -142,6 +142,10 @@ Use this when continuing in a fresh Codex chat.
   real-device run. It verifies staged assets, requires the corrected norm+lm_head
   endpoint by default, runs a generic iOS build, and prints the recommended
   device settings plus log analyzer command.
+- `scripts/import_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>`
+  is the preferred Mac-side one-shot after copying the RunPod artifact back. It
+  runs endpoint refresh without a duplicate build, then runs strict device
+  preflight once.
 - A simple app icon exists in `Assets.xcassets/AppIcon.appiconset`.
 - Chat composer text is not tokenized on device yet. It now accepts pasted
   `input_ids_last4=...`, `input_ids=...`, four `#123` IDs, or four raw IDs from
@@ -157,9 +161,11 @@ all 48 layers without crashing.
 
 1. Reconnect RunPod or another CUDA host with the Gemma weights and run:
    `./scripts/runpod_refresh_gemma4_coreml_endpoint.sh`.
-   Then run `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>`
-   on the Mac to compile, copy, verify, and build.
-2. Run `./scripts/preflight_coreml_probe_device.sh`.
+   Then run `./scripts/import_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>`
+   on the Mac to compile, copy, verify, preflight, and build.
+2. If you need to split the Mac-side steps, run
+   `./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>`
+   and then `./scripts/preflight_coreml_probe_device.sh`.
 3. Verify the device log loads
    `gemma4_12b_norm_lm_head_1tok_int4_block32` with no `LM head fallback`.
 4. Save the Xcode console output and run

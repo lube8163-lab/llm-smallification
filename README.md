@@ -56,7 +56,7 @@ back to the Mac, then refresh the app-local endpoint:
 
 ```bash
 ./scripts/runpod_refresh_gemma4_coreml_endpoint.sh
-./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>
+./scripts/import_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>
 ```
 
 The RunPod wrapper runs `runpod_preflight_gemma4_coreml_endpoint.sh` first to
@@ -182,10 +182,11 @@ generation summary:
   --max-peak-mb 350
 ```
 
-Before opening Xcode for the device run, run the strict local preflight after
-the endpoint refresh:
+The lower-level refresh and preflight scripts remain available when you want to
+run the steps separately:
 
 ```bash
+./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>
 ./scripts/preflight_coreml_probe_device.sh
 ```
 

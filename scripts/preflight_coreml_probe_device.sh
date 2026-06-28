@@ -92,7 +92,7 @@ device preflight passed
 Recommended real-device settings:
   endpoint compute: CPU
   decoder compute:  CPU+GPU
-  layers:           First 48
+  layers:           First $EXPECTED_LAYERS
   cache:            Run end
   tokens:           8 first, then 16 if peak memory remains stable
 

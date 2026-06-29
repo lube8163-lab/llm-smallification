@@ -24,6 +24,12 @@ def decoder_re(seq_len: int) -> re.Pattern[str]:
     )
 
 
+def decoder_chunk_re(seq_len: int) -> re.Pattern[str]:
+    return re.compile(
+        rf"^gemma4_12b_layers(?P<start>\d+)_(?P<end>\d+)_decoder_seq{seq_len}_mask_int4_block32\.mlmodelc$"
+    )
+
+
 class Reporter:
     def __init__(self) -> None:
         self.errors: list[str] = []
@@ -73,14 +79,28 @@ def verify_required_bundle(model_dir: Path, name: str, reporter: Reporter) -> bo
 def verify_decoders(model_dir: Path, expected_layers: int, seq_len: int, reporter: Reporter) -> None:
     by_index: dict[int, list[str]] = {}
     ignored: list[str] = []
-    pattern = decoder_re(seq_len)
+    layer_pattern = decoder_re(seq_len)
+    chunk_pattern = decoder_chunk_re(seq_len)
 
-    for path in model_dir.glob(f"gemma4_12b_layer*_decoder_seq{seq_len}_mask_int4_block32.mlmodelc"):
-        match = pattern.match(path.name)
+    for path in model_dir.glob(f"gemma4_12b_layer[0-9]*_decoder_seq{seq_len}_mask_int4_block32.mlmodelc"):
+        match = layer_pattern.match(path.name)
         if not match:
             ignored.append(path.name)
             continue
         by_index.setdefault(int(match.group("index")), []).append(path.name)
+
+    for path in model_dir.glob(f"gemma4_12b_layers[0-9]*_decoder_seq{seq_len}_mask_int4_block32.mlmodelc"):
+        match = chunk_pattern.match(path.name)
+        if not match:
+            ignored.append(path.name)
+            continue
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        if end < start:
+            reporter.error(f"invalid decoder chunk range: {path.name}")
+            continue
+        for index in range(start, end + 1):
+            by_index.setdefault(index, []).append(path.name)
 
     if ignored:
         reporter.warn(f"ignored decoder-like names: {', '.join(sorted(ignored))}")
@@ -102,7 +122,11 @@ def verify_decoders(model_dir: Path, expected_layers: int, seq_len: int, reporte
         reporter.warn(f"duplicate decoder bundles: {details}")
 
     if not missing and not extra:
-        reporter.ok(f"decoder layers cover 0...{expected_layers - 1} ({len(actual)} bundles)")
+        bundle_count = len({name for names in by_index.values() for name in names})
+        reporter.ok(
+            f"decoder layers cover 0...{expected_layers - 1} "
+            f"({len(actual)} layer indices, {bundle_count} bundle(s))"
+        )
 
 
 def verify_lm_head(

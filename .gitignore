@@ -8,6 +8,7 @@
 *.safetensors
 *.mlpackage/
 *.mlmodelc/
+ios/CoreMLProbe/CoreMLProbe/Models/gemma4-tokenizer.json
 __pycache__/
 .venv/
 .derived-data/

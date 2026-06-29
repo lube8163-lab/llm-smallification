@@ -39,13 +39,18 @@ if [[ "$ENDPOINTS_ONLY" != "1" ]]; then
   while IFS= read -r model; do
     DECODER_MODELS+=("$model")
   done < <(
-    find "$SRC_DIR" -maxdepth 1 -type d \
-      -name "gemma4_12b_layer*_decoder_seq${SEQ_LEN}_mask_int4_block32.mlmodelc" \
-      -exec basename {} \; | sort
+    {
+      find "$SRC_DIR" -maxdepth 1 -type d \
+        -name "gemma4_12b_layer[0-9][0-9]_decoder_seq${SEQ_LEN}_mask_int4_block32.mlmodelc" \
+        -exec basename {} \;
+      find "$SRC_DIR" -maxdepth 1 -type d \
+        -name "gemma4_12b_layers[0-9][0-9]_[0-9][0-9]_decoder_seq${SEQ_LEN}_mask_int4_block32.mlmodelc" \
+        -exec basename {} \;
+    } | sort
   )
 
   if [[ "${#DECODER_MODELS[@]}" -eq 0 ]]; then
-    echo "missing decoder layers: $SRC_DIR/gemma4_12b_layer*_decoder_seq${SEQ_LEN}_mask_int4_block32.mlmodelc" >&2
+    echo "missing decoder layers/chunks: $SRC_DIR/gemma4_12b_layer*_decoder_seq${SEQ_LEN}_mask_int4_block32.mlmodelc" >&2
     exit 1
   fi
 fi
@@ -71,7 +76,10 @@ rm -rf "$DST_DIR/$NORM_LM_HEAD_MODEL" "$DST_DIR/$LEGACY_LM_HEAD_MODEL"
 
 if [[ "$ENDPOINTS_ONLY" != "1" ]]; then
   find "$DST_DIR" -maxdepth 1 -type d \
-    -name "gemma4_12b_layer*_decoder_seq${SEQ_LEN}_mask_int4_block32.mlmodelc" \
+    -name "gemma4_12b_layer[0-9][0-9]_decoder_seq${SEQ_LEN}_mask_int4_block32.mlmodelc" \
+    -exec rm -rf {} +
+  find "$DST_DIR" -maxdepth 1 -type d \
+    -name "gemma4_12b_layers[0-9][0-9]_[0-9][0-9]_decoder_seq${SEQ_LEN}_mask_int4_block32.mlmodelc" \
     -exec rm -rf {} +
 fi
 

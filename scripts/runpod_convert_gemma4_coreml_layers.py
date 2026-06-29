@@ -45,6 +45,37 @@ class DecoderLayerMaskWrapper(torch.nn.Module):
         )
 
 
+class DecoderLayerChunkMaskWrapper(torch.nn.Module):
+    def __init__(self, language_model: torch.nn.Module, layer_indices: list[int]):
+        super().__init__()
+        self.rotary_emb = language_model.rotary_emb
+        self.layer_indices = layer_indices
+        self.layers = torch.nn.ModuleList(
+            [language_model.layers[layer_idx] for layer_idx in layer_indices]
+        )
+        self.layer_types = [
+            language_model.config.layer_types[layer_idx] for layer_idx in layer_indices
+        ]
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        position_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        for layer, layer_type in zip(self.layers, self.layer_types):
+            position_embeddings = self.rotary_emb(x, position_ids, layer_type)
+            x = layer(
+                x,
+                shared_kv_states={},
+                position_embeddings=position_embeddings,
+                attention_mask=attention_mask,
+                position_ids=position_ids,
+                past_key_values=None,
+            )
+        return x
+
+
 def package_size(path: Path) -> int:
     total = 0
     for root, _, files in os.walk(path):
@@ -77,6 +108,32 @@ def parse_layers(spec: str, num_layers: int) -> list[int]:
     return result
 
 
+def layer_groups(layers: list[int], chunk_size: int) -> list[list[int]]:
+    if chunk_size <= 1:
+        return [[layer] for layer in layers]
+
+    groups: list[list[int]] = []
+    current: list[int] = []
+    for layer in layers:
+        if current and (layer != current[-1] + 1 or len(current) >= chunk_size):
+            groups.append(current)
+            current = []
+        current.append(layer)
+
+    if current:
+        groups.append(current)
+    return groups
+
+
+def decoder_prefix(layer_group: list[int], seq_len: int) -> str:
+    if len(layer_group) == 1:
+        return f"gemma4_12b_layer{layer_group[0]:02d}_decoder_seq{seq_len}_mask"
+    return (
+        f"gemma4_12b_layers{layer_group[0]:02d}_{layer_group[-1]:02d}"
+        f"_decoder_seq{seq_len}_mask"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -89,6 +146,7 @@ def main() -> None:
     )
     parser.add_argument("--layers", default="all")
     parser.add_argument("--seq-len", type=int, default=4)
+    parser.add_argument("--chunk-size", type=int, default=1)
     parser.add_argument("--block-size", type=int, default=32)
     parser.add_argument("--keep-fp16", action="store_true")
     parser.add_argument("--force", action="store_true")
@@ -144,12 +202,17 @@ def main() -> None:
         diagonal=1,
     )
 
+    if args.chunk_size < 1:
+        raise ValueError("--chunk-size must be >= 1")
+
     total_int4_size = 0
     converted = 0
-    for layer_idx in layers:
-        layer = language_model.layers[layer_idx]
-        attn = layer.self_attn
-        prefix = f"gemma4_12b_layer{layer_idx:02d}_decoder_seq{seq_len}_mask"
+    groups = layer_groups(layers, args.chunk_size)
+    for group in groups:
+        first_layer_idx = group[0]
+        last_layer_idx = group[-1]
+        attn = language_model.layers[first_layer_idx].self_attn
+        prefix = decoder_prefix(group, seq_len)
         fp16_path = out_dir / f"{prefix}_fp16.mlpackage"
         int4_path = out_dir / f"{prefix}_int4_block{args.block_size}.mlpackage"
 
@@ -158,7 +221,7 @@ def main() -> None:
             total_int4_size += size
             print(
                 "skip_existing",
-                layer_idx,
+                f"{first_layer_idx}-{last_layer_idx}",
                 int4_path,
                 "bytes",
                 size,
@@ -167,10 +230,14 @@ def main() -> None:
             continue
 
         print(
-            "convert_layer",
-            layer_idx,
+            "convert_group",
+            f"{first_layer_idx}-{last_layer_idx}",
+            "layers",
+            group,
+            "chunk_size",
+            len(group),
             "type",
-            language_model.config.layer_types[layer_idx],
+            ",".join(language_model.config.layer_types[layer_idx] for layer_idx in group),
             "has_v_proj",
             attn.v_proj is not None,
             "store_full_length_kv",
@@ -178,7 +245,10 @@ def main() -> None:
             flush=True,
         )
 
-        wrapper = DecoderLayerMaskWrapper(language_model, layer_idx).eval().cuda()
+        if len(group) == 1:
+            wrapper = DecoderLayerMaskWrapper(language_model, first_layer_idx).eval().cuda()
+        else:
+            wrapper = DecoderLayerChunkMaskWrapper(language_model, group).eval().cuda()
         with torch.inference_mode():
             output = wrapper(example_x, example_pos, example_mask)
             print("forward_ok", tuple(output.shape), output.dtype, flush=True)
@@ -189,7 +259,7 @@ def main() -> None:
             )
 
         traced = traced.eval().cpu()
-        print("trace_ok", layer_idx, flush=True)
+        print("trace_ok", f"{first_layer_idx}-{last_layer_idx}", flush=True)
 
         mlmodel = ct.convert(
             traced,
@@ -239,6 +309,8 @@ def main() -> None:
         "done",
         "converted",
         converted,
+        "groups_seen",
+        len(groups),
         "layers_seen",
         len(layers),
         "total_int4_gib",

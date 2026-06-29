@@ -96,6 +96,7 @@ struct ProbeComputePlan {
 enum ProbeSequenceLength: Int, CaseIterable, Identifiable {
     case seq4 = 4
     case seq20 = 20
+    case seq32 = 32
 
     var id: Int { rawValue }
 
@@ -108,7 +109,7 @@ enum ProbeSequenceLength: Int, CaseIterable, Identifiable {
     }
 
     var decoderName: String {
-        "gemma4_12b_layer0_decoder_seq\(rawValue)_mask_int4_block32"
+        "gemma4_12b_layer00_decoder_seq\(rawValue)_mask_int4_block32"
     }
 
     var decoderSuffix: String {
@@ -123,6 +124,13 @@ enum ProbeSequenceLength: Int, CaseIterable, Identifiable {
             [
                 2, 105, 2364, 107, 85141, 236924, 238906, 237234, 7604, 31600,
                 3335, 106, 107, 105, 4368, 107, 100, 45518, 107, 101
+            ]
+        case .seq32:
+            [
+                2, 105, 2364, 107, 85141, 236924, 238906, 237234, 7604, 31600,
+                3335, 236924, 94951, 237007, 239309, 241910, 237000, 236951,
+                239375, 221357, 117495, 109943, 236924, 106, 107, 105,
+                4368, 107, 100, 45518, 107, 101
             ]
         }
     }
@@ -144,6 +152,9 @@ enum ProbeSequenceLength: Int, CaseIterable, Identifiable {
     }
 
     static func bestAvailable() -> ProbeSequenceLength {
+        if modelExists(named: ProbeSequenceLength.seq32.embeddingName) {
+            return .seq32
+        }
         if modelExists(named: ProbeSequenceLength.seq20.embeddingName) {
             return .seq20
         }
@@ -157,6 +168,7 @@ enum ProbeSequenceLength: Int, CaseIterable, Identifiable {
         return switch value.lowercased() {
         case "seq4", "s4": .seq4
         case "seq20", "s20": .seq20
+        case "seq32", "s32": .seq32
         default: nil
         }
     }
@@ -427,8 +439,20 @@ struct ProbeFailure: Error {
 }
 
 struct DecoderLayerModel {
-    let index: Int
+    let startIndex: Int
+    let endIndex: Int
     let name: String
+
+    var layerCount: Int {
+        endIndex - startIndex + 1
+    }
+
+    var title: String {
+        if startIndex == endIndex {
+            return "\(startIndex)"
+        }
+        return "\(startIndex)-\(endIndex)"
+    }
 }
 
 struct DecoderLayerPlan {
@@ -438,7 +462,11 @@ struct DecoderLayerPlan {
 
     var detail: String {
         let requested = selection.requestedCount.map(String.init) ?? "all"
-        return "selected=\(layers.count), available=\(availableCount), requested=\(requested)"
+        return "selected=\(selectedLayerCount), models=\(layers.count), available=\(availableCount), requested=\(requested)"
+    }
+
+    var selectedLayerCount: Int {
+        layers.reduce(0) { $0 + $1.layerCount }
     }
 }
 
@@ -484,11 +512,12 @@ enum ProbeMemory {
 
 enum ProbeRunner {
     private static let decoderPrefix = "gemma4_12b_layer"
+    private static let decoderChunkPrefix = "gemma4_12b_layers"
     private static let lmHeadName = "gemma4_12b_norm_lm_head_1tok_int4_block32"
     private static let legacyLMHeadName = "gemma4_12b_lm_head_1tok_int4_block32"
     private static let lmHeadNames = [lmHeadName, legacyLMHeadName]
     static let defaultGeneratedTokenCount = 2
-    static let maxGeneratedTokenCount = 32
+    static let maxGeneratedTokenCount = 64
 
     static var defaultInputIDsText: String {
         defaultInputIDsText(sequenceLength: .seq4)
@@ -615,7 +644,7 @@ enum ProbeRunner {
                         steps: &steps
                     )
                 }
-                summary = "OK: loaded \(plan.layers.count) decoder layers"
+                summary = "OK: loaded \(plan.selectedLayerCount) decoder layers in \(plan.layers.count) model(s)"
             case .embeddingOnly:
                 let inputWindow = try selectedInputWindow(overrideText: inputIDsText, sequenceLength: sequenceLength)
                 let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
@@ -623,7 +652,7 @@ enum ProbeRunner {
             case .decoderOnly:
                 let hidden = try makeHidden(seqLength: sequenceLength.rawValue)
                 let decoded = try runDecoder(
-                    layer: DecoderLayerModel(index: 0, name: sequenceLength.decoderName),
+                    layer: DecoderLayerModel(startIndex: 0, endIndex: 0, name: sequenceLength.decoderName),
                     hidden: hidden,
                     config: decoderConfig,
                     sequenceLength: sequenceLength,
@@ -653,7 +682,7 @@ enum ProbeRunner {
                 let inputWindow = try selectedInputWindow(overrideText: inputIDsText, sequenceLength: sequenceLength)
                 let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let decoded = try runDecoder(
-                    layer: DecoderLayerModel(index: 0, name: sequenceLength.decoderName),
+                    layer: DecoderLayerModel(startIndex: 0, endIndex: 0, name: sequenceLength.decoderName),
                     hidden: hidden,
                     config: decoderConfig,
                     sequenceLength: sequenceLength,
@@ -995,7 +1024,7 @@ enum ProbeRunner {
             let positionIDs = try makePositionIDs(seqLength: sequenceLength.rawValue, start: positionStart)
             let mask = try makeCausalMask(seqLength: sequenceLength.rawValue)
             let output = try timedPrediction(
-                name: "Decoder layer \(layer.index)",
+                name: "Decoder layer \(layer.title)",
                 model: decoder,
                 provider: MLDictionaryFeatureProvider(dictionary: [
                     "x": MLFeatureValue(multiArray: hidden),
@@ -1014,44 +1043,75 @@ enum ProbeRunner {
     }
 
     private static func decoderLayerPlan(selection: ProbeLayerSelection, sequenceLength: ProbeSequenceLength) throws -> DecoderLayerPlan {
-        var byIndex: [Int: DecoderLayerModel] = [:]
+        var candidatesByStart: [Int: [DecoderLayerModel]] = [:]
+        var coveredIndices: Set<Int> = []
         let urls = Bundle.main.urls(forResourcesWithExtension: "mlmodelc", subdirectory: "Models") ?? []
 
         for url in urls {
             let name = url.deletingPathExtension().lastPathComponent
-            guard name.hasPrefix(decoderPrefix), name.hasSuffix(sequenceLength.decoderSuffix) else {
-                continue
-            }
-
-            let start = name.index(name.startIndex, offsetBy: decoderPrefix.count)
-            let end = name.index(name.endIndex, offsetBy: -sequenceLength.decoderSuffix.count)
-            let numberText = String(name[start..<end])
-            guard let index = Int(numberText) else {
-                continue
-            }
-
-            let candidate = DecoderLayerModel(index: index, name: name)
-            if let existing = byIndex[index] {
-                byIndex[index] = candidate.name.count > existing.name.count ? candidate : existing
+            let model: DecoderLayerModel?
+            if name.hasPrefix(decoderChunkPrefix), name.hasSuffix(sequenceLength.decoderSuffix) {
+                let start = name.index(name.startIndex, offsetBy: decoderChunkPrefix.count)
+                let end = name.index(name.endIndex, offsetBy: -sequenceLength.decoderSuffix.count)
+                let rangeText = String(name[start..<end])
+                let parts = rangeText.split(separator: "_", maxSplits: 1).map(String.init)
+                if parts.count == 2,
+                   let startIndex = Int(parts[0]),
+                   let endIndex = Int(parts[1]),
+                   startIndex <= endIndex {
+                    model = DecoderLayerModel(startIndex: startIndex, endIndex: endIndex, name: name)
+                } else {
+                    model = nil
+                }
+            } else if name.hasPrefix(decoderPrefix), name.hasSuffix(sequenceLength.decoderSuffix) {
+                let start = name.index(name.startIndex, offsetBy: decoderPrefix.count)
+                let end = name.index(name.endIndex, offsetBy: -sequenceLength.decoderSuffix.count)
+                let numberText = String(name[start..<end])
+                if let index = Int(numberText) {
+                    model = DecoderLayerModel(startIndex: index, endIndex: index, name: name)
+                } else {
+                    model = nil
+                }
             } else {
-                byIndex[index] = candidate
+                model = nil
+            }
+
+            guard let model else {
+                continue
+            }
+            candidatesByStart[model.startIndex, default: []].append(model)
+            for index in model.startIndex...model.endIndex {
+                coveredIndices.insert(index)
             }
         }
 
-        let layers = byIndex.values.sorted { $0.index < $1.index }
-        guard !layers.isEmpty else {
-            throw ProbeError.missingModel("\(decoderPrefix)*\(sequenceLength.decoderSuffix).mlmodelc")
+        guard !coveredIndices.isEmpty else {
+            throw ProbeError.missingModel("\(decoderPrefix)*\(sequenceLength.decoderSuffix).mlmodelc or \(decoderChunkPrefix)*\(sequenceLength.decoderSuffix).mlmodelc")
         }
 
-        let selectedLayers: [DecoderLayerModel]
-        if let count = selection.requestedCount {
-            selectedLayers = Array(layers.prefix(count))
-        } else {
-            selectedLayers = layers
+        let availableCount = coveredIndices.count
+        let targetCount = selection.requestedCount ?? availableCount
+        var selectedLayers: [DecoderLayerModel] = []
+        var cursor = 0
+        while cursor < targetCount {
+            guard let candidates = candidatesByStart[cursor] else {
+                throw ProbeError.missingModel("decoder layer \(cursor) for seq\(sequenceLength.rawValue)")
+            }
+            let validCandidates = candidates.filter { $0.endIndex < targetCount }
+            guard let selected = validCandidates.max(by: { lhs, rhs in
+                if lhs.layerCount == rhs.layerCount {
+                    return lhs.name < rhs.name
+                }
+                return lhs.layerCount < rhs.layerCount
+            }) else {
+                throw ProbeError.missingModel("decoder layer \(cursor) for seq\(sequenceLength.rawValue)")
+            }
+            selectedLayers.append(selected)
+            cursor = selected.endIndex + 1
         }
 
         return DecoderLayerPlan(
-            availableCount: layers.count,
+            availableCount: availableCount,
             layers: selectedLayers,
             selection: selection
         )

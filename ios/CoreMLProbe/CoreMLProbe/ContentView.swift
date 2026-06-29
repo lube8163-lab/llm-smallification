@@ -431,8 +431,164 @@ enum TokenDisplay {
     }
 
     static func joinedLabels(for tokenIDs: [Int]) -> String {
-        tokenIDs.map(label(for:)).joined(separator: " ")
+        if let decoded = GemmaTokenizerStore.shared.tokenizer?.decode(tokenIDs: tokenIDs),
+           !decoded.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return decoded
+        }
+        return tokenIDs.map(label(for:)).joined(separator: " ")
     }
+}
+
+final class GemmaBPETokenizer {
+    private let vocab: [String: Int32]
+    private let tokenByID: [Int: String]
+    private let vocabPiecesByFirstCharacter: [Character: [String]]
+
+    init(url: URL) throws {
+        let data = try Data(contentsOf: url)
+        guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let model = root["model"] as? [String: Any],
+              let rawVocab = model["vocab"] as? [String: Any] else {
+            throw ProbeError.invalidInputIDs("invalid tokenizer JSON")
+        }
+
+        var parsedVocab: [String: Int32] = [:]
+        var parsedTokenByID: [Int: String] = [:]
+        var buckets: [Character: [String]] = [:]
+        parsedVocab.reserveCapacity(rawVocab.count)
+        parsedTokenByID.reserveCapacity(rawVocab.count)
+        for (token, value) in rawVocab {
+            let id: Int?
+            if let intValue = value as? Int {
+                id = intValue
+            } else if let numberValue = value as? NSNumber {
+                id = numberValue.intValue
+            } else {
+                id = nil
+            }
+            guard let id, let int32ID = Int32(exactly: id) else {
+                continue
+            }
+            parsedVocab[token] = int32ID
+            parsedTokenByID[id] = token
+            if let first = token.first,
+               !(token.hasPrefix("<") && token.hasSuffix(">")) {
+                buckets[first, default: []].append(token)
+            }
+        }
+
+        vocab = parsedVocab
+        tokenByID = parsedTokenByID
+        vocabPiecesByFirstCharacter = buckets.mapValues { pieces in
+            pieces.sorted { lhs, rhs in
+                if lhs.count == rhs.count {
+                    return lhs < rhs
+                }
+                return lhs.count > rhs.count
+            }
+        }
+    }
+
+    func encodeChatWindow(prompt: String, sequenceLength: ProbeSequenceLength) throws -> [Int32] {
+        let ids = try encodeChat(prompt: prompt)
+        guard ids.count >= sequenceLength.rawValue else {
+            throw ProbeError.invalidInputIDs(
+                "tokenizer produced \(ids.count) chat token IDs; Seq \(sequenceLength.rawValue) needs at least \(sequenceLength.rawValue). Use a longer prompt, Seq 20, or paste input_ids."
+            )
+        }
+        return Array(ids.suffix(sequenceLength.rawValue))
+    }
+
+    func decode(tokenIDs: [Int]) -> String {
+        let pieces = tokenIDs.compactMap { tokenByID[$0] }
+        var bytes: [UInt8] = []
+        var output = ""
+
+        func flushBytes() {
+            guard !bytes.isEmpty else { return }
+            output += String(decoding: bytes, as: UTF8.self)
+            bytes.removeAll()
+        }
+
+        for piece in pieces {
+            if let byte = byteFallbackValue(piece) {
+                bytes.append(byte)
+                continue
+            }
+            flushBytes()
+            guard !piece.hasPrefix("<") || !piece.hasSuffix(">") else {
+                continue
+            }
+            output += piece
+        }
+        flushBytes()
+        return output.replacingOccurrences(of: "▁", with: " ")
+    }
+
+    private func encodeChat(prompt: String) throws -> [Int32] {
+        var ids: [Int32] = [2, 105, 2364, 107]
+        ids.append(contentsOf: try encodeText(prompt))
+        ids.append(contentsOf: [106, 107, 105, 4368, 107, 100, 45518, 107, 101])
+        return ids
+    }
+
+    private func encodeText(_ text: String) throws -> [Int32] {
+        let normalized = text.replacingOccurrences(of: " ", with: "▁")
+        let pieces = greedyPieces(for: normalized)
+        return try pieces.map { piece in
+            guard let id = vocab[piece] else {
+                throw ProbeError.invalidInputIDs("tokenizer piece is missing from vocab: \(piece)")
+            }
+            return id
+        }
+    }
+
+    private func greedyPieces(for text: String) -> [String] {
+        var pieces: [String] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            let first = text[index]
+            var matchedPiece: String?
+            if let candidates = vocabPiecesByFirstCharacter[first] {
+                let remaining = text[index...]
+                for candidate in candidates where remaining.hasPrefix(candidate) {
+                    matchedPiece = candidate
+                    break
+                }
+            }
+
+            if let matchedPiece {
+                pieces.append(matchedPiece)
+                index = text.index(index, offsetBy: matchedPiece.count)
+            } else {
+                let scalarText = String(first)
+                for byte in scalarText.utf8 {
+                    pieces.append(String(format: "<0x%02X>", byte))
+                }
+                index = text.index(after: index)
+            }
+        }
+        return pieces
+    }
+
+    private func byteFallbackValue(_ piece: String) -> UInt8? {
+        guard piece.hasPrefix("<0x"), piece.hasSuffix(">") else {
+            return nil
+        }
+        let start = piece.index(piece.startIndex, offsetBy: 3)
+        let end = piece.index(before: piece.endIndex)
+        return UInt8(piece[start..<end], radix: 16)
+    }
+}
+
+final class GemmaTokenizerStore {
+    static let shared = GemmaTokenizerStore()
+    private(set) lazy var tokenizer: GemmaBPETokenizer? = {
+        guard let url = Bundle.main.url(forResource: "gemma4-tokenizer", withExtension: "json", subdirectory: "Models") else {
+            return nil
+        }
+        return try? GemmaBPETokenizer(url: url)
+    }()
 }
 
 @MainActor
@@ -632,6 +788,16 @@ final class ChatViewModel: ObservableObject {
             return TokenWindowResolution(
                 text: text,
                 detail: tokenWindowDetail(text: text, source: "from message IDs", ids: ids, sequenceLength: sequenceLength),
+                shouldUpdateInputField: true
+            )
+        }
+
+        if let tokenizer = GemmaTokenizerStore.shared.tokenizer {
+            let ids = try tokenizer.encodeChatWindow(prompt: messageText, sequenceLength: sequenceLength)
+            let text = formatTokenWindow(ids)
+            return TokenWindowResolution(
+                text: text,
+                detail: tokenWindowDetail(text: text, source: "from bundled tokenizer", ids: ids, sequenceLength: sequenceLength),
                 shouldUpdateInputField: true
             )
         }

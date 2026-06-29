@@ -83,6 +83,11 @@ def first_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
     return pattern.search(text)
 
 
+def last_match(pattern: re.Pattern[str], text: str) -> re.Match[str] | None:
+    matches = list(pattern.finditer(text))
+    return matches[-1] if matches else None
+
+
 def analyze(text: str, args: argparse.Namespace) -> int:
     reporter = Reporter()
     coreml_lines = [line for line in text.splitlines() if "[CoreMLProbe]" in line]
@@ -92,14 +97,14 @@ def analyze(text: str, args: argparse.Namespace) -> int:
     else:
         reporter.ok(f"found {len(coreml_lines)} CoreMLProbe log lines")
 
-    run_started = first_match(RUN_STARTED_RE, text)
+    run_started = last_match(RUN_STARTED_RE, text)
     if run_started:
         detail = run_started.group("detail")
         reporter.ok(f"run started: {detail}")
     else:
         reporter.warn("missing run started line")
 
-    run_finished = first_match(RUN_FINISHED_RE, text)
+    run_finished = last_match(RUN_FINISHED_RE, text)
     if run_finished:
         summary = run_finished.group("summary")
         if summary.startswith("OK"):
@@ -151,7 +156,7 @@ def analyze(text: str, args: argparse.Namespace) -> int:
     elif args.expect_layers is not None:
         reporter.error("decoder stack selection not found")
 
-    peak_match = first_match(PEAK_MEMORY_RE, text)
+    peak_match = last_match(PEAK_MEMORY_RE, text)
     if peak_match:
         peak = float(peak_match.group("memory"))
         if args.max_peak_mb is not None and peak > args.max_peak_mb:
@@ -163,7 +168,7 @@ def analyze(text: str, args: argparse.Namespace) -> int:
     else:
         reporter.warn("peak memory not found")
 
-    generated_match = first_match(GENERATED_TOKENS_RE, text)
+    generated_match = last_match(GENERATED_TOKENS_RE, text)
     if generated_match:
         tokens = parse_generated_tokens(generated_match.group("detail"))
         unique_tokens = sorted(set(tokens))

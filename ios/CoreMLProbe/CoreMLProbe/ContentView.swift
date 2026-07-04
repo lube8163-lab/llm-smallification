@@ -1,3 +1,4 @@
+import Darwin
 import SwiftUI
 
 enum AppTab: Hashable {
@@ -5,17 +6,112 @@ enum AppTab: Hashable {
     case probe
 }
 
+enum AutomationRunKind: String {
+    case probe
+    case speedSweep = "speed-sweep"
+    case stabilitySweep = "stability-sweep"
+    case retentionSweep = "retention-sweep"
+    case multimodalSmoke = "multimodal-smoke"
+    case imageSmoke = "image-smoke"
+    case audioSmoke = "audio-smoke"
+    case chat
+
+    var usesChat: Bool {
+        self == .chat
+    }
+
+    static func parse(_ rawValue: String?) -> AutomationRunKind? {
+        guard let rawValue else { return nil }
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        switch value {
+        case "", "0", "false", "no", "off", "none":
+            return nil
+        case "1", "true", "yes", "on", "probe", "run", "single":
+            return .probe
+        case "speed", "speed-sweep":
+            return .speedSweep
+        case "stability", "stability-sweep":
+            return .stabilitySweep
+        case "retention", "retain", "retention-sweep", "retain-sweep":
+            return .retentionSweep
+        case "multimodal", "image", "image-smoke", "vision-smoke":
+            return .imageSmoke
+        case "audio", "audio-smoke":
+            return .audioSmoke
+        case "multimodal-smoke", "synthetic-multimodal":
+            return .multimodalSmoke
+        case "chat", "chat-smoke":
+            return .chat
+        default:
+            return nil
+        }
+    }
+}
+
+struct AutomationConfig {
+    let runKind: AutomationRunKind?
+    let autoExit: Bool
+    let chatPrompt: String
+
+    var shouldRun: Bool {
+        runKind != nil
+    }
+
+    static func current() -> AutomationConfig {
+        let arguments = ProcessInfo.processInfo.arguments
+        let environment = ProcessInfo.processInfo.environment
+        let runKind = AutomationRunKind.parse(argumentValue(arguments, prefix: "--automation="))
+            ?? AutomationRunKind.parse(argumentValue(arguments, prefix: "--autorun="))
+            ?? AutomationRunKind.parse(environment["COREML_PROBE_AUTORUN"])
+            ?? (arguments.contains("--autorun") ? .probe : nil)
+        let autoExit = boolValue(environment["COREML_PROBE_AUTO_EXIT"])
+            || arguments.contains("--auto-exit")
+            || arguments.contains("--exit-after-run")
+        let chatPrompt = argumentValue(arguments, prefix: "--chat-prompt=")
+            ?? environment["COREML_PROBE_CHAT_PROMPT"]
+            ?? "こんにちは。短く答えてください。"
+        return AutomationConfig(runKind: runKind, autoExit: autoExit, chatPrompt: chatPrompt)
+    }
+
+    private static func argumentValue(_ arguments: [String], prefix: String) -> String? {
+        guard let argument = arguments.first(where: { $0.hasPrefix(prefix) }) else { return nil }
+        return String(argument.dropFirst(prefix.count))
+    }
+
+    private static func boolValue(_ rawValue: String?) -> Bool {
+        guard let rawValue else { return false }
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+enum AutomationExit {
+    static func completeIfRequested(_ config: AutomationConfig, success: Bool, summary: String) {
+        guard config.autoExit else { return }
+        let status = success ? "success" : "failure"
+        let code: Int32 = success ? 0 : 1
+        print("[CoreMLProbe] automation finished status=\(status) exit_code=\(code) summary=\(summary)")
+        Task {
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            Darwin.exit(code)
+        }
+    }
+}
+
 struct ContentView: View {
     @StateObject private var probeViewModel: ProbeViewModel
     @StateObject private var chatViewModel: ChatViewModel
     @State private var selectedTab: AppTab
-    private let autoRun: Bool
+    private let automationConfig: AutomationConfig
 
     init() {
-        let shouldAutoRun = ProcessInfo.processInfo.arguments.contains("--autorun")
-            || ProcessInfo.processInfo.environment["COREML_PROBE_AUTORUN"] == "1"
-        autoRun = shouldAutoRun
-        _selectedTab = State(initialValue: shouldAutoRun ? .probe : .chat)
+        let config = AutomationConfig.current()
+        automationConfig = config
+        _selectedTab = State(initialValue: config.runKind?.usesChat == true ? .chat : (config.shouldRun ? .probe : .chat))
         _probeViewModel = StateObject(wrappedValue: ProbeViewModel())
         _chatViewModel = StateObject(wrappedValue: ChatViewModel())
     }
@@ -35,7 +131,11 @@ struct ContentView: View {
                 .tag(AppTab.probe)
         }
         .task {
-            probeViewModel.runIfRequested(autoRun)
+            if automationConfig.runKind?.usesChat == true {
+                chatViewModel.runIfRequested(automationConfig)
+            } else {
+                probeViewModel.runIfRequested(automationConfig)
+            }
         }
     }
 }
@@ -73,9 +173,24 @@ struct ChatScreen: View {
                         }
                     }
 
-                    Stepper(value: $viewModel.generatedTokenCount, in: 1...ProbeRunner.maxGeneratedTokenCount) {
-                        LabeledContent("Tokens", value: "\(viewModel.generatedTokenCount)")
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Max Tokens")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+
+                        Picker("Max Tokens", selection: $viewModel.generatedTokenCount) {
+                            ForEach(ChatViewModel.generatedTokenPresets, id: \.self) { count in
+                                Text("\(count)").tag(count)
+                            }
+                        }
+                        .pickerStyle(.segmented)
                     }
+                    .disabled(viewModel.isGenerating)
+
+                    Stepper(value: $viewModel.retainedDecoderModelCount, in: ProbeRunner.defaultRetainedDecoderModelCount...ProbeRunner.maxRetainedDecoderModelCount) {
+                        LabeledContent("Retain Decoders", value: "\(viewModel.retainedDecoderModelCount)")
+                    }
+                    .disabled(viewModel.isGenerating)
 
                     Picker("Window", selection: $viewModel.sequenceLength) {
                         ForEach(ProbeSequenceLength.allCases) { sequenceLength in
@@ -124,6 +239,9 @@ struct ChatScreen: View {
                     if !viewModel.generatedTokenText.isEmpty {
                         LabeledContent("Tokens", value: viewModel.generatedTokenText)
                     }
+                    if let statistics = ProbeRunStatistics(steps: viewModel.steps) {
+                        ProbeRunStatisticsRows(statistics: statistics)
+                    }
                 }
 
                 if !viewModel.steps.isEmpty {
@@ -150,7 +268,9 @@ struct ChatScreen: View {
                 ChatComposer(
                     text: $viewModel.messageText,
                     isGenerating: viewModel.isGenerating,
-                    send: viewModel.send
+                    send: {
+                        viewModel.send()
+                    }
                 )
             }
         }
@@ -335,11 +455,38 @@ struct ProbeScreen: View {
                         Stepper(value: $viewModel.generatedTokenCount, in: 1...ProbeRunner.maxGeneratedTokenCount) {
                             LabeledContent("Tokens", value: "\(viewModel.generatedTokenCount)")
                         }
+                        .disabled(viewModel.isRunning)
+
+                        Stepper(value: $viewModel.retainedDecoderModelCount, in: ProbeRunner.defaultRetainedDecoderModelCount...ProbeRunner.maxRetainedDecoderModelCount) {
+                            LabeledContent("Retain Decoders", value: "\(viewModel.retainedDecoderModelCount)")
+                        }
+                        .disabled(viewModel.isRunning)
                     }
                     Button {
                         viewModel.run()
                     } label: {
                         Label(viewModel.isRunning ? "Running" : "Run Probe", systemImage: "play.fill")
+                    }
+                    .disabled(viewModel.isRunning)
+
+                    Button {
+                        viewModel.runSpeedSweep()
+                    } label: {
+                        Label(viewModel.isRunning ? "Running" : "Run Speed Sweep", systemImage: "speedometer")
+                    }
+                    .disabled(viewModel.isRunning)
+
+                    Button {
+                        viewModel.runStabilitySweep()
+                    } label: {
+                        Label(viewModel.isRunning ? "Running" : "Run Stability Sweep", systemImage: "timer")
+                    }
+                    .disabled(viewModel.isRunning)
+
+                    Button {
+                        viewModel.runRetentionSweep()
+                    } label: {
+                        Label(viewModel.isRunning ? "Running" : "Run Retain Sweep", systemImage: "rectangle.stack")
                     }
                     .disabled(viewModel.isRunning)
 
@@ -354,6 +501,9 @@ struct ProbeScreen: View {
                 Section("Status") {
                     LabeledContent("Memory", value: viewModel.currentMemoryText)
                     LabeledContent("Result", value: viewModel.summary)
+                    if let statistics = ProbeRunStatistics(steps: viewModel.steps) {
+                        ProbeRunStatisticsRows(statistics: statistics)
+                    }
                 }
 
                 Section("Steps") {
@@ -394,6 +544,150 @@ struct ProbeStepRow: View {
     }
 }
 
+struct ProbeRunStatistics {
+    let generatedTokenCount: Int
+    let requestedTokenCount: Int?
+    let warmAverageSeconds: Double?
+    let totalAverageSeconds: Double?
+    let peakMemoryMB: Double?
+    let stopReason: String
+    let decoderLoadAverageSeconds: Double?
+    let decoderPredictAverageSeconds: Double?
+    let lmHeadAverageSeconds: Double?
+
+    init?(steps: [ProbeStep]) {
+        guard !steps.isEmpty else { return nil }
+
+        let tokenTotals = steps.compactMap { step -> Double? in
+            guard step.name.hasPrefix("Token "), step.name.hasSuffix(" total") else {
+                return nil
+            }
+            return step.seconds
+        }
+        let requested = Self.requestedTokenCount(from: steps)
+        let peak = steps.last(where: { $0.name == "Peak memory" })?.memoryMB
+            ?? steps.map(\.memoryMB).filter { $0 >= 0 }.max()
+        let warmTotals = tokenTotals.dropFirst()
+        let stopStep = steps.last(where: { $0.name == "Stop generation" })
+
+        generatedTokenCount = tokenTotals.count
+        requestedTokenCount = requested
+        warmAverageSeconds = warmTotals.isEmpty ? nil : Self.average(warmTotals)
+        totalAverageSeconds = tokenTotals.isEmpty ? nil : Self.average(tokenTotals)
+        peakMemoryMB = peak
+        stopReason = Self.stopReason(
+            generatedTokenCount: tokenTotals.count,
+            requestedTokenCount: requested,
+            explicitStopReason: stopStep?.detail
+        )
+        decoderLoadAverageSeconds = Self.averageDuration(
+            in: steps,
+            matching: { $0.name.hasPrefix("Load gemma4_12b_layers") && $0.name.contains("_decoder_") },
+            divisor: tokenTotals.count
+        )
+        decoderPredictAverageSeconds = Self.averageDuration(
+            in: steps,
+            matching: { $0.name.hasPrefix("Decoder layer ") },
+            divisor: tokenTotals.count
+        )
+        lmHeadAverageSeconds = Self.averageDuration(
+            in: steps,
+            matching: { $0.name.hasPrefix("LM head token ") },
+            divisor: tokenTotals.count
+        )
+    }
+
+    var tokenProgressText: String {
+        if let requestedTokenCount {
+            return "\(generatedTokenCount)/\(requestedTokenCount)"
+        }
+        return "\(generatedTokenCount)"
+    }
+
+    var warmAverageText: String {
+        warmAverageSeconds.map { String(format: "%.2fs/token", $0) } ?? "-"
+    }
+
+    var totalAverageText: String {
+        totalAverageSeconds.map { String(format: "%.2fs/token", $0) } ?? "-"
+    }
+
+    var peakMemoryText: String {
+        peakMemoryMB.map { String(format: "%.1f MB", $0) } ?? "-"
+    }
+
+    var timingBreakdownText: String {
+        let decoderLoad = decoderLoadAverageSeconds.map { String(format: "load %.2fs", $0) } ?? "load -"
+        let decoderPredict = decoderPredictAverageSeconds.map { String(format: "decode %.2fs", $0) } ?? "decode -"
+        let lmHead = lmHeadAverageSeconds.map { String(format: "lm %.2fs", $0) } ?? "lm -"
+        return "\(decoderLoad), \(decoderPredict), \(lmHead)"
+    }
+
+    private static func requestedTokenCount(from steps: [ProbeStep]) -> Int? {
+        guard let generationStep = steps.last(where: { $0.name == "Generation loop" }) else {
+            return nil
+        }
+        let marker = "tokens="
+        guard let range = generationStep.detail.range(of: marker) else {
+            return nil
+        }
+        let tail = generationStep.detail[range.upperBound...]
+        let digits = tail.prefix { $0.isNumber }
+        return Int(String(digits))
+    }
+
+    private static func stopReason(
+        generatedTokenCount: Int,
+        requestedTokenCount: Int?,
+        explicitStopReason: String?
+    ) -> String {
+        if let explicitStopReason, !explicitStopReason.isEmpty {
+            return explicitStopReason
+        }
+        if let requestedTokenCount, generatedTokenCount >= requestedTokenCount {
+            return "max tokens reached"
+        }
+        if generatedTokenCount > 0 {
+            return "completed"
+        }
+        return "-"
+    }
+
+    private static func average<S: Sequence>(_ values: S) -> Double where S.Element == Double {
+        let values = Array(values)
+        guard !values.isEmpty else { return 0 }
+        return values.reduce(0, +) / Double(values.count)
+    }
+
+    private static func averageDuration(
+        in steps: [ProbeStep],
+        matching predicate: (ProbeStep) -> Bool,
+        divisor: Int
+    ) -> Double? {
+        guard divisor > 0 else { return nil }
+        let sum = steps.reduce(0.0) { partial, step in
+            guard predicate(step), let seconds = step.seconds else {
+                return partial
+            }
+            return partial + seconds
+        }
+        return sum / Double(divisor)
+    }
+}
+
+struct ProbeRunStatisticsRows: View {
+    let statistics: ProbeRunStatistics
+
+    var body: some View {
+        LabeledContent("Generated", value: statistics.tokenProgressText)
+        LabeledContent("Warm Avg", value: statistics.warmAverageText)
+        LabeledContent("All Avg", value: statistics.totalAverageText)
+        LabeledContent("Peak", value: statistics.peakMemoryText)
+        LabeledContent("Stop", value: statistics.stopReason)
+        LabeledContent("Timing", value: statistics.timingBreakdownText)
+    }
+}
+
 enum ChatRole {
     case user
     case assistant
@@ -415,9 +709,110 @@ struct ChatMessage: Identifiable {
     let isError: Bool
 }
 
+struct ProbeSweepCase {
+    let title: String
+    let endpoint: ProbeComputeSelection
+    let decoder: ProbeComputeSelection
+    let tokens: Int
+    let retainedDecoders: Int
+}
+
+enum ProbeSweep {
+    static let speedCases: [ProbeSweepCase] = [
+        ProbeSweepCase(
+            title: "Decoder CPU+GPU",
+            endpoint: .cpuOnly,
+            decoder: .cpuAndGPU,
+            tokens: 4,
+            retainedDecoders: 0
+        ),
+        ProbeSweepCase(
+            title: "Decoder All",
+            endpoint: .cpuOnly,
+            decoder: .all,
+            tokens: 4,
+            retainedDecoders: 0
+        ),
+        ProbeSweepCase(
+            title: "Decoder CPU+ANE",
+            endpoint: .cpuOnly,
+            decoder: .cpuAndNeuralEngine,
+            tokens: 4,
+            retainedDecoders: 0
+        )
+    ]
+
+    static let stabilityCases: [ProbeSweepCase] = [
+        ProbeSweepCase(
+            title: "Decoder All 8",
+            endpoint: .cpuOnly,
+            decoder: .all,
+            tokens: 8,
+            retainedDecoders: 0
+        ),
+        ProbeSweepCase(
+            title: "Decoder All 16",
+            endpoint: .cpuOnly,
+            decoder: .all,
+            tokens: 16,
+            retainedDecoders: 0
+        )
+    ]
+
+    static let retentionCases: [ProbeSweepCase] = [
+        ProbeSweepCase(
+            title: "Retain 0",
+            endpoint: .cpuOnly,
+            decoder: .all,
+            tokens: 8,
+            retainedDecoders: 0
+        ),
+        ProbeSweepCase(
+            title: "Retain 1",
+            endpoint: .cpuOnly,
+            decoder: .all,
+            tokens: 8,
+            retainedDecoders: 1
+        )
+    ]
+
+    static func summaryLine(for sweepCase: ProbeSweepCase, result: Result<ProbeReport, ProbeFailure>) -> String {
+        let steps: [ProbeStep]
+        let status: String
+        switch result {
+        case .success(let report):
+            steps = report.steps
+            status = "OK"
+        case .failure(let failure):
+            steps = failure.steps
+            status = "FAIL"
+        }
+
+        let tokenTotals = steps.compactMap { step -> Double? in
+            guard step.name.hasPrefix("Token "), step.name.hasSuffix(" total") else {
+                return nil
+            }
+            return step.seconds
+        }
+        let warmTotals = tokenTotals.dropFirst()
+        let warmAverage = warmTotals.isEmpty ? nil : warmTotals.reduce(0, +) / Double(warmTotals.count)
+        let peak = steps.map(\.memoryMB).filter { $0 >= 0 }.max()
+        let generated = steps.last(where: { $0.name == "Generated tokens" })?.detail ?? "-"
+        let warmText = warmAverage.map { String(format: "%.2fs", $0) } ?? "-"
+        let peakText = peak.map { String(format: "%.1f MB", $0) } ?? "-"
+        return "\(sweepCase.title): \(status), tokens=\(tokenTotals.count)/\(sweepCase.tokens), warm=\(warmText), peak=\(peakText), \(generated)"
+    }
+}
+
 enum TokenDisplay {
     private static let knownTokens: [Int: String] = [
+        0: "<pad>",
+        1: "<eos>",
         2: "<bos>",
+        105: "<|turn>",
+        106: "<turn|>",
+        107: "\\n",
+        108: "\\n\\n",
         255999: "<boi>",
         256000: "<boa>",
         258880: "<image>",
@@ -443,6 +838,7 @@ final class GemmaBPETokenizer {
     private let vocab: [String: Int32]
     private let tokenByID: [Int: String]
     private let vocabPiecesByFirstCharacter: [Character: [String]]
+    private let padTokenID: Int32
 
     init(url: URL) throws {
         let data = try Data(contentsOf: url)
@@ -479,6 +875,7 @@ final class GemmaBPETokenizer {
 
         vocab = parsedVocab
         tokenByID = parsedTokenByID
+        padTokenID = parsedVocab["<pad>"] ?? 0
         vocabPiecesByFirstCharacter = buckets.mapValues { pieces in
             pieces.sorted { lhs, rhs in
                 if lhs.count == rhs.count {
@@ -491,10 +888,8 @@ final class GemmaBPETokenizer {
 
     func encodeChatWindow(prompt: String, sequenceLength: ProbeSequenceLength) throws -> [Int32] {
         let ids = try encodeChat(prompt: prompt)
-        guard ids.count >= sequenceLength.rawValue else {
-            throw ProbeError.invalidInputIDs(
-                "tokenizer produced \(ids.count) chat token IDs; Seq \(sequenceLength.rawValue) needs at least \(sequenceLength.rawValue). Use a longer prompt, Seq 20, or paste input_ids."
-            )
+        if ids.count < sequenceLength.rawValue {
+            return Array(repeating: padTokenID, count: sequenceLength.rawValue - ids.count) + ids
         }
         return Array(ids.suffix(sequenceLength.rawValue))
     }
@@ -593,8 +988,10 @@ final class GemmaTokenizerStore {
 
 @MainActor
 final class ChatViewModel: ObservableObject {
+    static let generatedTokenPresets = [8, 16, 32]
+
     @Published var endpointComputeSelection = ProbeComputeSelection.selectedEndpointFromProcess(default: .cpuOnly)
-    @Published var decoderComputeSelection = ProbeComputeSelection.selectedDecoderFromProcess(default: .cpuAndGPU)
+    @Published var decoderComputeSelection = ProbeComputeSelection.selectedDecoderFromProcess(default: .all)
     @Published var layerSelection = ProbeLayerSelection.selectedFromProcess(default: .first48)
     @Published var cacheClearPolicy = ProbeCacheClearPolicy.selectedFromProcess(default: .runEndOnly)
     @Published var sequenceLength: ProbeSequenceLength {
@@ -604,7 +1001,8 @@ final class ChatViewModel: ObservableObject {
         }
     }
     @Published var inputIDsText: String
-    @Published var generatedTokenCount = ProbeRunner.selectedGeneratedTokenCountFromProcess()
+    @Published var generatedTokenCount = ChatViewModel.selectedGeneratedTokenPresetFromProcess()
+    @Published var retainedDecoderModelCount = ProbeRunner.selectedRetainedDecoderModelCountFromProcess()
     @Published var messageText = ""
     @Published var isGenerating = false
     @Published var messages: [ChatMessage] = []
@@ -612,6 +1010,7 @@ final class ChatViewModel: ObservableObject {
     @Published var summary = "Idle"
     @Published var generatedTokenText = ""
     @Published var currentMemoryText = ProbeMemory.currentText()
+    private var didAutoRun = false
 
     var recentSteps: [ProbeStep] {
         Array(steps.suffix(16))
@@ -621,6 +1020,14 @@ final class ChatViewModel: ObservableObject {
         let sequenceLength = ProbeRunner.selectedSequenceLengthFromProcess()
         self.sequenceLength = sequenceLength
         self.inputIDsText = ProbeRunner.selectedInputIDsTextFromProcess(sequenceLength: sequenceLength)
+    }
+
+    private static func selectedGeneratedTokenPresetFromProcess() -> Int {
+        let selected = ProbeRunner.selectedGeneratedTokenCountFromProcess(default: ProbeRunner.defaultChatGeneratedTokenCount)
+        guard generatedTokenPresets.contains(selected) else {
+            return ProbeRunner.defaultChatGeneratedTokenCount
+        }
+        return selected
     }
 
     func clear() {
@@ -637,9 +1044,26 @@ final class ChatViewModel: ObservableObject {
         currentMemoryText = ProbeMemory.currentText()
     }
 
-    func send() {
+    func runIfRequested(_ config: AutomationConfig) {
+        guard config.runKind == .chat, !didAutoRun else { return }
+        didAutoRun = true
+        messageText = config.chatPrompt
+        print("[CoreMLProbe] automation requested kind=\(config.runKind?.rawValue ?? "-") auto_exit=\(config.autoExit)")
+        send { success, summary in
+            AutomationExit.completeIfRequested(config, success: success, summary: summary)
+        }
+    }
+
+    func send(completion: ((Bool, String) -> Void)? = nil) {
         let text = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isGenerating else { return }
+        guard !isGenerating else {
+            completion?(false, "generation already running")
+            return
+        }
+        guard !text.isEmpty else {
+            completion?(false, "empty message")
+            return
+        }
 
         let resolvedWindow: TokenWindowResolution
         do {
@@ -667,11 +1091,13 @@ final class ChatViewModel: ObservableObject {
                 detail: error.localizedDescription,
                 isError: true
             ))
+            completion?(false, error.localizedDescription)
             return
         }
 
         let inputIDsText = resolvedWindow.text
         let generatedTokenCount = generatedTokenCount
+        let retainedDecoderModelCount = retainedDecoderModelCount
         let computePlan = ProbeComputePlan(endpoint: endpointComputeSelection, decoder: decoderComputeSelection)
         let layerSelection = layerSelection
         let cacheClearPolicy = cacheClearPolicy
@@ -702,10 +1128,13 @@ final class ChatViewModel: ObservableObject {
                     cacheClearPolicy: cacheClearPolicy,
                     sequenceLength: sequenceLength,
                     inputIDsText: inputIDsText,
-                    generatedTokenCount: generatedTokenCount
+                    generatedTokenCount: generatedTokenCount,
+                    retainedDecoderModelCount: retainedDecoderModelCount
                 )
             }.value
 
+            let success: Bool
+            let completionSummary: String
             switch result {
             case .success(let report):
                 let tokens = Self.generatedTokenIDs(from: report)
@@ -728,6 +1157,8 @@ final class ChatViewModel: ObservableObject {
                 ) {
                     self.inputIDsText = nextWindow
                 }
+                success = true
+                completionSummary = report.summary
             case .failure(let error):
                 steps = error.steps
                 summary = error.message
@@ -739,10 +1170,13 @@ final class ChatViewModel: ObservableObject {
                     detail: error.message,
                     isError: true
                 ))
+                success = false
+                completionSummary = error.message
             }
 
             currentMemoryText = ProbeMemory.currentText()
             isGenerating = false
+            completion?(success, completionSummary)
         }
     }
 
@@ -825,6 +1259,10 @@ final class ChatViewModel: ObservableObject {
         var parts = ["\(sequenceLength.title) \(text)", source]
         if let repeatedToken = repeatedToken(in: ids) {
             parts.append("repeated #\(repeatedToken)")
+        }
+        let leftPadCount = ids.prefix { $0 == 0 }.count
+        if leftPadCount > 0 {
+            parts.append("left-pad=\(leftPadCount)")
         }
         return parts.joined(separator: " | ")
     }
@@ -978,6 +1416,7 @@ final class ProbeViewModel: ObservableObject {
     }
     @Published var inputIDsText: String
     @Published var generatedTokenCount = ProbeRunner.selectedGeneratedTokenCountFromProcess()
+    @Published var retainedDecoderModelCount = ProbeRunner.selectedRetainedDecoderModelCountFromProcess()
     @Published var isRunning = false
     @Published var steps: [ProbeStep] = []
     @Published var summary = "Idle"
@@ -996,14 +1435,41 @@ final class ProbeViewModel: ObservableObject {
         currentMemoryText = ProbeMemory.currentText()
     }
 
-    func runIfRequested(_ shouldRun: Bool) {
-        guard shouldRun, !didAutoRun else { return }
+    func runIfRequested(_ config: AutomationConfig) {
+        guard let runKind = config.runKind, !runKind.usesChat, !didAutoRun else { return }
         didAutoRun = true
-        run()
+        print("[CoreMLProbe] automation requested kind=\(runKind.rawValue) auto_exit=\(config.autoExit)")
+        let completion: (Bool, String) -> Void = { success, summary in
+            AutomationExit.completeIfRequested(config, success: success, summary: summary)
+        }
+        switch runKind {
+        case .probe:
+            run(completion: completion)
+        case .speedSweep:
+            runSpeedSweep(completion: completion)
+        case .stabilitySweep:
+            runStabilitySweep(completion: completion)
+        case .retentionSweep:
+            runRetentionSweep(completion: completion)
+        case .multimodalSmoke:
+            runMode = .multimodalSmoke
+            run(completion: completion)
+        case .imageSmoke:
+            runMode = .imageSmoke
+            run(completion: completion)
+        case .audioSmoke:
+            runMode = .audioSmoke
+            run(completion: completion)
+        case .chat:
+            break
+        }
     }
 
-    func run() {
-        guard !isRunning else { return }
+    func run(completion: ((Bool, String) -> Void)? = nil) {
+        guard !isRunning else {
+            completion?(false, "probe already running")
+            return
+        }
         isRunning = true
         steps.removeAll()
         summary = "Running"
@@ -1016,6 +1482,7 @@ final class ProbeViewModel: ObservableObject {
         let sequenceLength = self.sequenceLength
         let inputIDsText = inputIDsText
         let generatedTokenCount = generatedTokenCount
+        let retainedDecoderModelCount = retainedDecoderModelCount
         Task {
             let result = await Task.detached(priority: .userInitiated) {
                 ProbeRunner.run(
@@ -1025,20 +1492,117 @@ final class ProbeViewModel: ObservableObject {
                     cacheClearPolicy: cacheClearPolicy,
                     sequenceLength: sequenceLength,
                     inputIDsText: inputIDsText,
-                    generatedTokenCount: generatedTokenCount
+                    generatedTokenCount: generatedTokenCount,
+                    retainedDecoderModelCount: retainedDecoderModelCount
                 )
             }.value
 
+            let success: Bool
+            let completionSummary: String
             switch result {
             case .success(let report):
                 steps = report.steps
                 summary = report.summary
+                success = true
+                completionSummary = report.summary
             case .failure(let error):
                 steps = error.steps
                 summary = error.message
+                success = false
+                completionSummary = error.message
             }
             currentMemoryText = ProbeMemory.currentText()
             isRunning = false
+            completion?(success, completionSummary)
+        }
+    }
+
+    func runSpeedSweep(completion: ((Bool, String) -> Void)? = nil) {
+        runSweep(title: "speed sweep", cases: ProbeSweep.speedCases, completion: completion)
+    }
+
+    func runStabilitySweep(completion: ((Bool, String) -> Void)? = nil) {
+        runSweep(title: "stability sweep", cases: ProbeSweep.stabilityCases, completion: completion)
+    }
+
+    func runRetentionSweep(completion: ((Bool, String) -> Void)? = nil) {
+        runSweep(title: "retention sweep", cases: ProbeSweep.retentionCases, completion: completion)
+    }
+
+    private func runSweep(
+        title: String,
+        cases sweepCases: [ProbeSweepCase],
+        completion: ((Bool, String) -> Void)? = nil
+    ) {
+        guard !isRunning else {
+            completion?(false, "probe already running")
+            return
+        }
+        isRunning = true
+        steps.removeAll()
+        summary = "Running \(title)"
+        currentMemoryText = ProbeMemory.currentText()
+
+        let layerSelection: ProbeLayerSelection = .first48
+        let cacheClearPolicy: ProbeCacheClearPolicy = .runEndOnly
+        let sequenceLength = self.sequenceLength
+        let inputIDsText = inputIDsText
+
+        Task {
+            let sweepResult = await Task.detached(priority: .userInitiated) {
+                var combinedSteps: [ProbeStep] = []
+                var summaryLines: [String] = []
+                var allSucceeded = true
+                print("[CoreMLProbe] sweep started kind=\(title) cases=\(sweepCases.count) mode=generate-token-loop seq=\(sequenceLength.rawValue) layers=\(layerSelection.rawValue) cache=\(cacheClearPolicy.rawValue)")
+
+                for (index, sweepCase) in sweepCases.enumerated() {
+                    let caseNumber = index + 1
+                    let caseDetail = "case=\(caseNumber)/\(sweepCases.count) endpoint=\(sweepCase.endpoint.title) decoder=\(sweepCase.decoder.title) tokens=\(sweepCase.tokens) retain=\(sweepCase.retainedDecoders)"
+                    print("[CoreMLProbe] sweep case started \(caseDetail)")
+                    combinedSteps.append(ProbeStep(
+                        name: "Sweep case \(caseNumber)",
+                        seconds: nil,
+                        memoryMB: ProbeMemory.currentMB(),
+                        detail: caseDetail
+                    ))
+
+                    let result = ProbeRunner.run(
+                        computePlan: ProbeComputePlan(endpoint: sweepCase.endpoint, decoder: sweepCase.decoder),
+                        mode: .generateTokenLoop,
+                        layerSelection: layerSelection,
+                        cacheClearPolicy: cacheClearPolicy,
+                        sequenceLength: sequenceLength,
+                        inputIDsText: inputIDsText,
+                        generatedTokenCount: sweepCase.tokens,
+                        retainedDecoderModelCount: sweepCase.retainedDecoders
+                    )
+                    summaryLines.append(ProbeSweep.summaryLine(for: sweepCase, result: result))
+
+                    switch result {
+                    case .success(let report):
+                        combinedSteps.append(contentsOf: report.steps)
+                    case .failure(let failure):
+                        allSucceeded = false
+                        combinedSteps.append(contentsOf: failure.steps)
+                    }
+                    print("[CoreMLProbe] sweep case finished \(caseDetail) result=\(summaryLines.last ?? "-")")
+                }
+
+                combinedSteps.append(ProbeStep(
+                    name: "Sweep summary",
+                    seconds: nil,
+                    memoryMB: ProbeMemory.currentMB(),
+                    detail: summaryLines.joined(separator: " | ")
+                ))
+                print("[CoreMLProbe] sweep finished kind=\(title) \(summaryLines.joined(separator: " | "))")
+                return (steps: combinedSteps, summary: summaryLines.joined(separator: " | "), success: allSucceeded)
+            }.value
+
+            steps = sweepResult.steps
+            summary = sweepResult.summary
+            currentMemoryText = ProbeMemory.currentText()
+            isRunning = false
+            completion?(sweepResult.success, sweepResult.summary)
         }
     }
 }

@@ -42,7 +42,7 @@ Use this when continuing in a fresh Codex chat.
 - Model: `google/gemma-4-12B-it-qat-q4_0-unquantized`
 - Current conversion path: fixed `seq=64`, no KV cache, layer-by-layer Core ML MLProgram,
   fp16 compute precision, int4 per-block weight quantization, block size 32.
-- iPhone device: iPhone18,3 on iOS 26.4.2.
+- iPhone device: iPhone 17 (non-Pro, 256GB; device identifier `iPhone18,3`) on iOS 26.4.2.
 - CPU-only sequential load/predict/release works through all 48 decoder layers.
 - Best current 48-layer log:
   - `full-stack-sequential`: peak `192.1 MB`, top logit `#253027 1.747`

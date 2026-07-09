@@ -30,7 +30,8 @@ enum ProbeComputeSelection: String, CaseIterable, Identifiable {
 
     static let endpointCases: [ProbeComputeSelection] = [
         .cpuOnly,
-        .cpuAndGPU
+        .cpuAndGPU,
+        .all
     ]
 
     static func selectedFromProcess(default fallback: ProbeComputeSelection) -> ProbeComputeSelection {
@@ -106,15 +107,70 @@ enum ProbeSequenceLength: Int, CaseIterable, Identifiable {
     }
 
     var embeddingName: String {
-        "gemma4_12b_embedding_seq\(rawValue)_int4_block32"
+        // Fall back to the int4 embedding when the requested variant asset is
+        // not bundled. The pal4 embedding is deliberately not shipped: its ANE
+        // compilation decompresses the 262k-vocab LUT table and the transient
+        // spike jetsams the app, while the int4/CPU embedding predict is
+        // already ~4ms and irrelevant to per-token latency.
+        let variantName = "gemma4_12b_embedding_seq\(rawValue)_\(ProbeSequenceLength.endpointVariant)"
+        if ProbeSequenceLength.modelExists(named: variantName) {
+            return variantName
+        }
+        return "gemma4_12b_embedding_seq\(rawValue)_int4_block32"
     }
 
     var decoderName: String {
-        "gemma4_12b_layer00_decoder_seq\(rawValue)_mask_int4_block32"
+        "gemma4_12b_layer00_decoder_seq\(rawValue)_mask_\(ProbeSequenceLength.decoderVariant)"
     }
 
     var decoderSuffix: String {
-        "_decoder_seq\(rawValue)_mask_int4_block32"
+        "_decoder_seq\(rawValue)_mask_\(ProbeSequenceLength.decoderVariant)"
+    }
+
+    /// Weight-compression variant tag in decoder bundle names. When the pal4
+    /// (ANE-executable) decoder assets are bundled they are the default — this
+    /// is the measured-fast configuration (all decoder layers resident on the
+    /// ANE, ~1.8s/token vs 12s for int4/CPU). Env/argument overrides still win
+    /// so the A/B automation keeps working.
+    static let decoderVariant: String = {
+        processVariant(
+            environmentKey: "COREML_PROBE_DECODER_VARIANT",
+            argumentPrefix: "--decoder-variant=",
+            autoDetectName: "gemma4_12b_layers00_03_decoder_seq64_mask_pal4_g16"
+        )
+    }()
+
+    /// Same idea for the embedding / norm+lm_head endpoints, independent of the
+    /// decoder variant so mixed configurations (pal4 decoder + int4 endpoints)
+    /// remain testable. The embedding itself always falls back to int4/CPU.
+    static let endpointVariant: String = {
+        processVariant(
+            environmentKey: "COREML_PROBE_ENDPOINT_VARIANT",
+            argumentPrefix: "--endpoint-variant=",
+            autoDetectName: "gemma4_12b_norm_lm_head_1tok_pal4_g16"
+        )
+    }()
+
+    private static func processVariant(environmentKey: String, argumentPrefix: String, autoDetectName: String) -> String {
+        let environment = ProcessInfo.processInfo.environment
+        if let value = environment[environmentKey], !value.isEmpty {
+            return value
+        }
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix(argumentPrefix) }) {
+            let value = String(argument.dropFirst(argumentPrefix.count))
+            if !value.isEmpty {
+                return value
+            }
+        }
+        if modelExists(named: autoDetectName) {
+            return "pal4_g16"
+        }
+        return "int4_block32"
+    }
+
+    /// True when the app is running the auto-detected pal4/ANE stack.
+    static var usesPal4Stack: Bool {
+        decoderVariant == "pal4_g16"
     }
 
     var defaultInputIDs: [Int32] {
@@ -209,6 +265,7 @@ enum ProbeRunMode: String, CaseIterable, Identifiable {
     case multimodalSmoke = "multimodal-smoke"
     case imageSmoke = "image-smoke"
     case audioSmoke = "audio-smoke"
+    case memoryRamp = "memory-ramp"
 
     var id: String { rawValue }
 
@@ -230,6 +287,7 @@ enum ProbeRunMode: String, CaseIterable, Identifiable {
         case .multimodalSmoke: "Multimodal smoke"
         case .imageSmoke: "Image smoke"
         case .audioSmoke: "Audio smoke"
+        case .memoryRamp: "Memory ramp"
         }
     }
 
@@ -237,7 +295,7 @@ enum ProbeRunMode: String, CaseIterable, Identifiable {
         switch self {
         case .embeddingOnly, .fullSequential, .fullStackSequential, .generateOneToken, .generateTokenLoop:
             true
-        case .loadEmbedding, .loadDecoder, .loadLMHead, .loadAllSequential, .loadDecoderStack, .decoderOnly, .decoderStack, .lmHeadOnly, .multimodalSmoke, .imageSmoke, .audioSmoke:
+        case .loadEmbedding, .loadDecoder, .loadLMHead, .loadAllSequential, .loadDecoderStack, .decoderOnly, .decoderStack, .lmHeadOnly, .multimodalSmoke, .imageSmoke, .audioSmoke, .memoryRamp:
             false
         }
     }
@@ -252,7 +310,7 @@ enum ProbeRunMode: String, CaseIterable, Identifiable {
                 .lmHeadOnly, .fullSequential, .fullStackSequential,
                 .generateOneToken, .generateTokenLoop, .multimodalSmoke, .imageSmoke, .audioSmoke:
             true
-        case .loadDecoder, .loadDecoderStack, .decoderOnly, .decoderStack:
+        case .loadDecoder, .loadDecoderStack, .decoderOnly, .decoderStack, .memoryRamp:
             false
         }
     }
@@ -261,7 +319,7 @@ enum ProbeRunMode: String, CaseIterable, Identifiable {
         switch self {
         case .loadDecoder, .loadAllSequential, .loadDecoderStack, .decoderOnly,
                 .decoderStack, .fullSequential, .fullStackSequential,
-                .generateOneToken, .generateTokenLoop, .multimodalSmoke, .imageSmoke, .audioSmoke:
+                .generateOneToken, .generateTokenLoop, .multimodalSmoke, .imageSmoke, .audioSmoke, .memoryRamp:
             true
         case .loadEmbedding, .loadLMHead, .embeddingOnly, .lmHeadOnly:
             false
@@ -545,14 +603,39 @@ enum ProbeMemory {
         guard value >= 0 else { return "unknown" }
         return String(format: "%.1f MB", value)
     }
+
+    /// Bytes remaining before the process hits its jetsam (memory) limit,
+    /// reported by the kernel via `os_proc_available_memory()`. Returns a
+    /// negative value when the process is not memory-limited (e.g. attached to
+    /// the debugger, or the entitlement/limit is not in effect), in which case
+    /// the ceiling cannot be measured and the ramp should not trust it.
+    static func availableMB() -> Double {
+        let bytes = os_proc_available_memory()
+        guard bytes > 0 else { return -1 }
+        return Double(bytes) / 1_048_576.0
+    }
+
+    static func availableText() -> String {
+        let value = availableMB()
+        guard value >= 0 else { return "unknown" }
+        return String(format: "%.1f MB", value)
+    }
 }
 
 enum ProbeRunner {
     private static let decoderPrefix = "gemma4_12b_layer"
     private static let decoderChunkPrefix = "gemma4_12b_layers"
-    private static let lmHeadName = "gemma4_12b_norm_lm_head_1tok_int4_block32"
+    private static let lmHeadName = "gemma4_12b_norm_lm_head_1tok_\(ProbeSequenceLength.endpointVariant)"
+    private static let defaultLMHeadName = "gemma4_12b_norm_lm_head_1tok_int4_block32"
     private static let legacyLMHeadName = "gemma4_12b_lm_head_1tok_int4_block32"
-    private static let lmHeadNames = [lmHeadName, legacyLMHeadName]
+    private static let lmHeadNames: [String] = {
+        var names = [lmHeadName]
+        if !names.contains(defaultLMHeadName) {
+            names.append(defaultLMHeadName)
+        }
+        names.append(legacyLMHeadName)
+        return names
+    }()
     private static let imageEmbedderName = "gemma4_12b_image_embedder_patches32_int4_block32"
     private static let imageSmokePatchCount = 32
     private static let imageSmokePatchDim = 48 * 48 * 3
@@ -560,10 +643,29 @@ enum ProbeRunner {
     private static let audioSmokeTokenCount = 32
     private static let audioSmokeFeatureDim = 640
     static let defaultGeneratedTokenCount = 2
-    static let defaultChatGeneratedTokenCount = 8
-    static let maxGeneratedTokenCount = 64
+    static let defaultChatGeneratedTokenCount = 32
+    static let maxGeneratedTokenCount = 256
+    /// Sentinel meaning "let the model decide": run until it emits <eos> /
+    /// <end_of_turn>, bounded only by `autoGeneratedTokenCap` so a
+    /// non-terminating generation cannot run forever (~2s/token).
+    static let autoGeneratedTokenCount = 0
+    // Kept short on purpose: with Seq64 and no KV cache the prompt slides out of
+    // the window after a few dozen tokens and the model degenerates into
+    // repetition. Capping auto near that boundary keeps replies readable until
+    // KV cache + a longer window land.
+    static let autoGeneratedTokenCap = 40
     static let defaultRetainedDecoderModelCount = 0
-    static let maxRetainedDecoderModelCount = 1
+    // Raised from 1: keeping only a single chunk resident saved just one of the
+    // ~12 per-token reloads (no measurable speedup, per earlier device runs).
+    // The ramp probe showed each resident 4-layer chunk costs ~495 MB and that
+    // resident prediction is ~14x cheaper than reloading, so the win only
+    // appears when many chunks stay resident. loadRetainedDecoderModels stops
+    // early if the process runs low on memory, so requesting more than fits
+    // degrades gracefully. 36 covers the pal4 all-ANE plan: 4 sliding-only
+    // 4-layer chunks + 32 single-layer models (full-attention layers only
+    // compile for the ANE as singles).
+    static let maxRetainedDecoderModelCount = 36
+    static let defaultMemoryMarginMB = 500
     private static let maxSupportedDecoderBundleLayers = 4
     private static let generatedStopTokenIDs: Set<Int> = [1, 106]
     private static let repeatedGeneratedTokenLimit = 4
@@ -587,17 +689,45 @@ enum ProbeRunner {
     static func selectedGeneratedTokenCountFromProcess(default fallback: Int = defaultGeneratedTokenCount) -> Int {
         guard let rawValue = processGeneratedTokenCountText(),
               let count = Int(rawValue),
-              (1...maxGeneratedTokenCount).contains(count) else {
+              (autoGeneratedTokenCount...maxGeneratedTokenCount).contains(count) else {
             return fallback
         }
         return count
     }
 
+    /// The stable measured configuration on iPhone 17 (8GB): 24 resident ANE
+    /// decoder models + 12 transiently reloaded singles per token ≈ 1.8s/token.
+    /// Retaining more coexists poorly with the lm_head under system-wide
+    /// memory pressure; retaining fewer wastes reload time.
+    static var recommendedRetainedDecoderModelCount: Int {
+        guard ProbeSequenceLength.usesPal4Stack else { return defaultRetainedDecoderModelCount }
+        // Residency only pays off on the newer, larger Neural Engines. On A19
+        // (iPhone18,x) holding 24 pal4 models gives ~2s/token; on the A15
+        // (iPhone14,x) the ANE saturates and per-token slows to ~14s, so
+        // reload-per-token (retain 0, ~4.3s) is actually faster there. Devices
+        // newer than the tested A19 default to residency; older/unknown ones
+        // fall back to reload-per-token.
+        return deviceMajorVersion >= 18 ? 24 : defaultRetainedDecoderModelCount
+    }
+
+    /// The numeric prefix of the hardware identifier ("iPhone18,3" → 18).
+    static let deviceMajorVersion: Int = {
+        var info = utsname()
+        uname(&info)
+        let identifier = withUnsafeBytes(of: &info.machine) { raw -> String in
+            let bytes = raw.prefix { $0 != 0 }
+            return String(decoding: bytes, as: UTF8.self)
+        }
+        guard identifier.hasPrefix("iPhone") else { return 0 }
+        let digits = identifier.dropFirst("iPhone".count).prefix { $0.isNumber }
+        return Int(digits) ?? 0
+    }()
+
     static func selectedRetainedDecoderModelCountFromProcess() -> Int {
         guard let rawValue = processRetainedDecoderModelCountText(),
               let count = Int(rawValue),
               (defaultRetainedDecoderModelCount...maxRetainedDecoderModelCount).contains(count) else {
-            return defaultRetainedDecoderModelCount
+            return recommendedRetainedDecoderModelCount
         }
         return count
     }
@@ -610,7 +740,9 @@ enum ProbeRunner {
         sequenceLength: ProbeSequenceLength = selectedSequenceLengthFromProcess(),
         inputIDsText: String? = nil,
         generatedTokenCount: Int? = nil,
-        retainedDecoderModelCount: Int? = nil
+        retainedDecoderModelCount: Int? = nil,
+        persistent: Bool = false,
+        onToken: ((Int) -> Void)? = nil
     ) -> Result<ProbeReport, ProbeFailure> {
         run(
             computePlan: .shared(computeSelection),
@@ -620,7 +752,9 @@ enum ProbeRunner {
             sequenceLength: sequenceLength,
             inputIDsText: inputIDsText,
             generatedTokenCount: generatedTokenCount,
-            retainedDecoderModelCount: retainedDecoderModelCount
+            retainedDecoderModelCount: retainedDecoderModelCount,
+            persistent: persistent,
+            onToken: onToken
         )
     }
 
@@ -632,12 +766,23 @@ enum ProbeRunner {
         sequenceLength: ProbeSequenceLength = selectedSequenceLengthFromProcess(),
         inputIDsText: String? = nil,
         generatedTokenCount: Int? = nil,
-        retainedDecoderModelCount: Int? = nil
+        retainedDecoderModelCount: Int? = nil,
+        imageHidden: MLMultiArray? = nil,
+        imageStartPosition: Int = -1,
+        persistent: Bool = false,
+        onToken: ((Int) -> Void)? = nil
     ) -> Result<ProbeReport, ProbeFailure> {
         var steps: [ProbeStep] = []
 
         do {
-            print("[CoreMLProbe] run started compute=\(computePlan.logDetail) mode=\(mode.rawValue) seq=\(sequenceLength.rawValue) layers=\(layerSelection.rawValue) cache=\(cacheClearPolicy.rawValue)")
+            resetStepFile()
+            if let pendingImageStatsLine {
+                appendToStepFile(pendingImageStatsLine)
+                Self.pendingImageStatsLine = nil
+            }
+            let startLine = "[CoreMLProbe] run started compute=\(computePlan.logDetail) mode=\(mode.rawValue) seq=\(sequenceLength.rawValue) layers=\(layerSelection.rawValue) cache=\(cacheClearPolicy.rawValue)"
+            print(startLine)
+            appendToStepFile(startLine)
             recordStep("Start", detail: "\(computePlan.logDetail), \(mode.title), \(sequenceLength.title), \(layerSelection.title), cache=\(cacheClearPolicy.title)", steps: &steps)
             clearCoreMLRuntimeCache(reason: "run start", steps: &steps)
             try validateComputePlan(computePlan, mode: mode)
@@ -651,19 +796,20 @@ enum ProbeRunner {
             case .loadEmbedding:
                 try runLoadOnly(
                     named: sequenceLength.embeddingName,
-                    config: endpointConfig,
+                    config: makeEmbeddingConfig(),
                     cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(sequenceLength.embeddingName)" : nil,
                     steps: &steps
                 )
                 summary = "OK: loaded embedding"
             case .loadDecoder:
+                let decoderToLoad = try warmModelName() ?? warmChunkName(sequenceLength: sequenceLength) ?? sequenceLength.decoderName
                 try runLoadOnly(
-                    named: sequenceLength.decoderName,
+                    named: decoderToLoad,
                     config: decoderConfig,
-                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: sequenceLength.decoderName),
+                    cacheClearReason: cacheClearPolicy.decoderReleaseReason(layerPosition: 1, totalLayers: 1, layerName: decoderToLoad),
                     steps: &steps
                 )
-                summary = "OK: loaded layer 0"
+                summary = "OK: loaded \(decoderToLoad)"
             case .loadLMHead:
                 try runLoadLMHeadOnly(
                     config: endpointConfig,
@@ -674,7 +820,7 @@ enum ProbeRunner {
             case .loadAllSequential:
                 try runLoadOnly(
                     named: sequenceLength.embeddingName,
-                    config: endpointConfig,
+                    config: makeEmbeddingConfig(),
                     cacheClearReason: cacheClearPolicy.clearsAfterNonDecoderRelease ? "released \(sequenceLength.embeddingName)" : nil,
                     steps: &steps
                 )
@@ -709,7 +855,7 @@ enum ProbeRunner {
                 summary = "OK: loaded \(plan.selectedLayerCount) decoder layers in \(plan.layers.count) model(s)"
             case .embeddingOnly:
                 let inputWindow = try selectedInputWindow(overrideText: inputIDsText, sequenceLength: sequenceLength)
-                let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+                let hidden = try runEmbedding(inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 summary = "OK: hidden \(hidden.shape)"
             case .decoderOnly:
                 let hidden = try makeHidden(seqLength: sequenceLength.rawValue)
@@ -744,7 +890,7 @@ enum ProbeRunner {
                 summary = "OK: \(top)"
             case .fullSequential:
                 let inputWindow = try selectedInputWindow(overrideText: inputIDsText, sequenceLength: sequenceLength)
-                let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+                let hidden = try runEmbedding(inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let decoded = try runDecoder(
                     layer: DecoderLayerModel(startIndex: 0, endIndex: 0, name: sequenceLength.decoderName),
                     hidden: hidden,
@@ -762,7 +908,7 @@ enum ProbeRunner {
                 summary = "OK: \(top)"
             case .fullStackSequential:
                 let inputWindow = try selectedInputWindow(overrideText: inputIDsText, sequenceLength: sequenceLength)
-                let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+                let hidden = try runEmbedding(inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
                 let decoded = try runDecoderStack(
                     hidden: hidden,
                     config: decoderConfig,
@@ -799,6 +945,10 @@ enum ProbeRunner {
                     inputIDsText: inputIDsText,
                     generatedTokenCount: generatedTokenCount,
                     retainedDecoderModelCount: retainedDecoderModelCount,
+                    imageHidden: imageHidden,
+                    imageStartPosition: imageStartPosition,
+                    persistent: persistent,
+                    onToken: onToken,
                     steps: &steps
                 )
                 let tokens = predictions.map { "#\($0.index)" }.joined(separator: ",")
@@ -833,6 +983,13 @@ enum ProbeRunner {
                     steps: &steps
                 )
                 summary = "OK: audio smoke token #\(token.index) \(String(format: "%.3f", token.logit))"
+            case .memoryRamp:
+                summary = try runMemoryRamp(
+                    decoderConfig: decoderConfig,
+                    layerSelection: layerSelection,
+                    sequenceLength: sequenceLength,
+                    steps: &steps
+                )
             }
 
             if cacheClearPolicy.clearsAtRunEnd {
@@ -841,12 +998,14 @@ enum ProbeRunner {
 
             recordPeakMemory(steps: &steps)
             print("[CoreMLProbe] run finished \(summary)")
+            appendToStepFile("[CoreMLProbe] run finished \(summary)")
             return .success(ProbeReport(steps: steps, summary: summary))
         } catch {
             clearCoreMLRuntimeCache(reason: "error cleanup", steps: &steps)
             recordStep("Error", detail: String(describing: error), steps: &steps)
             recordPeakMemory(steps: &steps)
             print("[CoreMLProbe] run failed: \(String(describing: error))")
+            appendToStepFile("[CoreMLProbe] run failed: \(String(describing: error))")
             return .failure(ProbeFailure(steps: steps, message: String(describing: error)))
         }
     }
@@ -857,8 +1016,47 @@ enum ProbeRunner {
         return config
     }
 
+    /// The embedding endpoint is a token-id gather: ANE/GPU offer no speedup
+    /// (CPU predict is ~4ms) and asking the runtime to compile the 262k-vocab
+    /// table for the ANE spikes transient memory past even the entitled limit
+    /// and jetsams the app. The embedding therefore always loads CPU-only,
+    /// regardless of the selected endpoint compute units (which still apply to
+    /// the norm+lm_head endpoint).
+    private static func makeEmbeddingConfig() -> MLModelConfiguration {
+        makeConfig(.cpuOnly)
+    }
+
+    /// Decoder chunks whose start layer is listed in `COREML_PROBE_GPU_CHUNKS`
+    /// (comma-separated start indices, or `--gpu-chunks=`) load with CPU+GPU
+    /// compute units instead of the selected decoder units. Purpose: Gemma4
+    /// chunks containing a full_attention layer are rejected by the ANE
+    /// compiler (ANECCompile() FAILED) — every load re-attempts that compile
+    /// (~30s, ~4.3GB transient) before falling back. Forcing those chunks
+    /// straight to the GPU skips the doomed ANE attempt; sliding-attention
+    /// chunks stay on the ANE.
+    private static let gpuChunkStartIndices: Set<Int> = {
+        let environment = ProcessInfo.processInfo.environment
+        let prefix = "--gpu-chunks="
+        let raw = environment["COREML_PROBE_GPU_CHUNKS"]
+            ?? ProcessInfo.processInfo.arguments
+                .first(where: { $0.hasPrefix(prefix) })
+                .map { String($0.dropFirst(prefix.count)) }
+        guard let raw else { return [] }
+        return Set(raw.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) })
+    }()
+
+    private static func decoderLoadConfig(for layer: DecoderLayerModel, base: MLModelConfiguration) -> MLModelConfiguration {
+        guard gpuChunkStartIndices.contains(layer.startIndex) else { return base }
+        return makeConfig(.cpuAndGPU)
+    }
+
     private static func validateComputePlan(_ computePlan: ProbeComputePlan, mode: ProbeRunMode) throws {
         guard mode.usesEndpointModels else { return }
+        // The high-water crash that motivated this guard was observed with the
+        // int4 endpoints (BNNS/GPU compile ballooning during load). Palettized
+        // endpoint variants target the ANE, so the guard only applies to the
+        // default int4 assets.
+        guard ProbeSequenceLength.endpointVariant == "int4_block32" else { return }
         switch computePlan.endpoint {
         case .cpuOnly, .cpuAndGPU:
             return
@@ -898,7 +1096,50 @@ enum ProbeRunner {
 
     private static func appendStep(_ step: ProbeStep, to steps: inout [ProbeStep]) {
         steps.append(step)
-        print("[CoreMLProbe] \(step.name) duration=\(step.durationText) memory=\(step.memoryText) detail=\(step.detail)")
+        let line = "[CoreMLProbe] \(step.name) duration=\(step.durationText) memory=\(step.memoryText) detail=\(step.detail)"
+        print(line)
+        appendToStepFile(line)
+    }
+
+    /// Mirrors every step line into Documents/probe-steps.log on device. The
+    /// devicectl console stream (Mercury) drops mid-run often enough that
+    /// benchmarks lose their tail; the file survives and is fetched afterwards
+    /// with `devicectl device copy from`. Truncated at each run start.
+    private static let stepFileURL: URL? = FileManager.default
+        .urls(for: .documentDirectory, in: .userDomainMask).first?
+        .appendingPathComponent("probe-steps.log")
+
+    private static var stepFileHandle: FileHandle?
+
+    /// Tail of the on-device step log, for the HTTP /log endpoint and
+    /// external debugging (coding agents fetch this instead of the flaky
+    /// devicectl console stream).
+    static func stepFileTail(maxLines: Int) -> String {
+        guard let url = stepFileURL,
+              let text = try? String(contentsOf: url, encoding: .utf8) else {
+            return ""
+        }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        return lines.suffix(max(1, maxLines)).joined(separator: "\n")
+    }
+
+    static func resetStepFile() {
+        guard let url = stepFileURL else { return }
+        try? stepFileHandle?.close()
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        stepFileHandle = try? FileHandle(forWritingTo: url)
+    }
+
+    private static func appendToStepFile(_ line: String) {
+        guard let data = (line + "\n").data(using: .utf8) else { return }
+        if stepFileHandle == nil, let url = stepFileURL {
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            stepFileHandle = try? FileHandle(forWritingTo: url)
+            _ = try? stepFileHandle?.seekToEnd()
+        }
+        try? stepFileHandle?.write(contentsOf: data)
     }
 
     private static func runLoadOnly(
@@ -934,7 +1175,6 @@ enum ProbeRunner {
     }
 
     private static func runEmbedding(
-        config: MLModelConfiguration,
         inputIDs: [Int32],
         sequenceLength: ProbeSequenceLength,
         cacheClearPolicy: ProbeCacheClearPolicy,
@@ -943,7 +1183,7 @@ enum ProbeRunner {
         recordStep("Prompt IDs", detail: inputIDs.map(String.init).joined(separator: ","), steps: &steps)
 
         let hidden = try autoreleasepool {
-            let embedding = try loadModel(named: sequenceLength.embeddingName, config: config, steps: &steps)
+            let embedding = try loadModel(named: sequenceLength.embeddingName, config: makeEmbeddingConfig(), steps: &steps)
             return try predictEmbedding(model: embedding, inputIDs: inputIDs, name: "Embedding", steps: &steps)
         }
         recordStep("Released \(sequenceLength.embeddingName)", detail: "hidden retained", steps: &steps)
@@ -963,7 +1203,7 @@ enum ProbeRunner {
         steps: inout [ProbeStep]
     ) throws -> (index: Int, logit: Float) {
         let inputWindow = try selectedInputWindow(overrideText: inputIDsText, sequenceLength: sequenceLength)
-        let hidden = try runEmbedding(config: endpointConfig, inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
+        let hidden = try runEmbedding(inputIDs: inputWindow.values, sequenceLength: sequenceLength, cacheClearPolicy: cacheClearPolicy, steps: &steps)
         let decoded = try runDecoderStack(
             hidden: hidden,
             config: decoderConfig,
@@ -985,6 +1225,76 @@ enum ProbeRunner {
         return token
     }
 
+    /// Embedding + norm/lm_head + retained decoder models for a chat turn.
+    struct LoadedChatModels {
+        let embedding: MLModel
+        let lmHead: LoadedProbeModel
+        let retained: RetainedDecoderModels
+    }
+
+    /// Models kept resident between chat turns (A: persistent residency). The
+    /// pal4 decoders execute on the ANE, so holding them costs almost no app
+    /// footprint (~300MB total) while removing the ~18s (warm) / ~150s (cold)
+    /// per-turn reload. Rebuilt only when the signature (variant/seq/retain/
+    /// compute) changes, and released on background/memory pressure.
+    private static var residentChatModels: LoadedChatModels?
+    private static var residentChatSignature: String?
+
+    static func releaseResidentChatModels() {
+        residentChatModels = nil
+        residentChatSignature = nil
+    }
+
+    private static func chatModelSignature(
+        sequenceLength: ProbeSequenceLength,
+        retainCount: Int,
+        layerSelection: ProbeLayerSelection,
+        endpointConfig: MLModelConfiguration,
+        decoderConfig: MLModelConfiguration
+    ) -> String {
+        [
+            ProbeSequenceLength.decoderVariant,
+            ProbeSequenceLength.endpointVariant,
+            "seq\(sequenceLength.rawValue)",
+            "retain\(retainCount)",
+            "layers\(layerSelection.rawValue)",
+            "ep\(endpointConfig.computeUnits.rawValue)",
+            "dec\(decoderConfig.computeUnits.rawValue)"
+        ].joined(separator: "|")
+    }
+
+    private static func ensureResidentChatModels(
+        signature: String,
+        plan: DecoderLayerPlan,
+        retainCount: Int,
+        sequenceLength: ProbeSequenceLength,
+        endpointConfig: MLModelConfiguration,
+        decoderConfig: MLModelConfiguration,
+        steps: inout [ProbeStep]
+    ) throws -> LoadedChatModels {
+        if let models = residentChatModels, residentChatSignature == signature {
+            recordStep("Resident chat models", detail: "reused signature=\(signature)", steps: &steps)
+            return models
+        }
+        // Drop the previous set first so its allocations free before reloading.
+        releaseResidentChatModels()
+        recordStep("Resident chat models", detail: "loading signature=\(signature)", steps: &steps)
+        let models = LoadedChatModels(
+            embedding: try loadModel(named: sequenceLength.embeddingName, config: makeEmbeddingConfig(), steps: &steps),
+            lmHead: try loadLMHead(config: endpointConfig, steps: &steps),
+            retained: try loadRetainedDecoderModels(
+                plan: plan,
+                requestedCount: retainCount,
+                config: decoderConfig,
+                sequenceLength: sequenceLength,
+                steps: &steps
+            )
+        )
+        residentChatModels = models
+        residentChatSignature = signature
+        return models
+    }
+
     private static func runGenerateTokenLoop(
         endpointConfig: MLModelConfiguration,
         decoderConfig: MLModelConfiguration,
@@ -994,6 +1304,10 @@ enum ProbeRunner {
         inputIDsText: String?,
         generatedTokenCount: Int?,
         retainedDecoderModelCount: Int?,
+        imageHidden: MLMultiArray? = nil,
+        imageStartPosition: Int = -1,
+        persistent: Bool = false,
+        onToken: ((Int) -> Void)? = nil,
         steps: inout [ProbeStep]
     ) throws -> [TokenPrediction] {
         var inputWindow = try selectedInputWindow(overrideText: inputIDsText, sequenceLength: sequenceLength)
@@ -1005,120 +1319,215 @@ enum ProbeRunner {
         let decoderPlan = try decoderLayerPlan(selection: layerSelection, sequenceLength: sequenceLength)
         recordStep(
             "Generation loop",
-            detail: "tokens=\(tokenCount) seq=\(sequenceLength.rawValue) strategy=reuse embedding+lm-head retain decoders=\(retainedDecoderCount) cache=\(cacheClearPolicy.rawValue)",
+            detail: "tokens=\(tokenCount) seq=\(sequenceLength.rawValue) strategy=reuse embedding+lm-head retain decoders=\(retainedDecoderCount) cache=\(cacheClearPolicy.rawValue) persistent=\(persistent)",
             steps: &steps
         )
 
-        let generationResult = try autoreleasepool { () throws -> (predictions: [TokenPrediction], lmHeadName: String, retainedDecoderNames: [String]) in
-            let embedding = try loadModel(named: sequenceLength.embeddingName, config: endpointConfig, steps: &steps)
-            let lmHead = try loadLMHead(config: endpointConfig, steps: &steps)
-            let retainedDecoders = try loadRetainedDecoderModels(
+        // Persistent path (chat): reuse resident models across turns, keep alive.
+        if persistent {
+            let signature = chatModelSignature(
+                sequenceLength: sequenceLength,
+                retainCount: retainedDecoderCount,
+                layerSelection: layerSelection,
+                endpointConfig: endpointConfig,
+                decoderConfig: decoderConfig
+            )
+            let models = try ensureResidentChatModels(
+                signature: signature,
                 plan: decoderPlan,
-                requestedCount: retainedDecoderCount,
-                config: decoderConfig,
+                retainCount: retainedDecoderCount,
+                sequenceLength: sequenceLength,
+                endpointConfig: endpointConfig,
+                decoderConfig: decoderConfig,
                 steps: &steps
             )
-            var localPredictions: [TokenPrediction] = []
+            let predictions = try runTokenLoop(
+                models: models,
+                decoderPlan: decoderPlan,
+                inputWindow: &inputWindow,
+                tokenCount: tokenCount,
+                imageHidden: imageHidden,
+                imageStartPosition: imageStartPosition,
+                sequenceLength: sequenceLength,
+                decoderConfig: decoderConfig,
+                layerSelection: layerSelection,
+                cacheClearPolicy: cacheClearPolicy,
+                onToken: onToken,
+                steps: &steps
+            )
+            recordStep("Kept resident chat models", detail: "embedding+lm-head+\(models.retained.names.count) decoders resident", steps: &steps)
+            recordGeneratedTokens(predictions, steps: &steps)
+            return predictions
+        }
 
-            for step in 1...tokenCount {
-                let tokenStart = Date()
-                let prediction = try autoreleasepool { () throws -> TokenPrediction in
-                    recordStep(
-                        "Prompt IDs \(step)",
-                        detail: "\(formatInputIDs(inputWindow.values)) positionStart=\(inputWindow.positionStart) leftPad=\(inputWindow.leftPadCount)",
-                        steps: &steps
-                    )
-                    if let repeatedToken = repeatedToken(in: inputWindow.values) {
-                        recordStep(
-                            "Repeated input window \(step)",
-                            detail: "#\(repeatedToken) repeated across all \(sequenceLength.rawValue) positions",
-                            steps: &steps
-                        )
-                    }
-                    let hidden = try predictEmbedding(
-                        model: embedding,
-                        inputIDs: inputWindow.values,
-                        name: "Embedding token \(step)",
-                        steps: &steps
-                    )
-                    let decoded = try runDecoderStack(
-                        hidden: hidden,
-                        config: decoderConfig,
-                        layerSelection: layerSelection,
-                        sequenceLength: sequenceLength,
-                        positionStart: inputWindow.positionStart,
-                        leftPadCount: inputWindow.leftPadCount,
-                        cacheClearPolicy: cacheClearPolicy,
-                        providedPlan: decoderPlan,
-                        retainedDecoders: retainedDecoders.models,
-                        steps: &steps
-                    )
-                    let lastHidden = try copyLastToken(from: decoded, sequenceLength: sequenceLength)
-                    let logits = try predictLMHead(
-                        model: lmHead.model,
-                        hidden: lastHidden,
-                        name: "LM head token \(step)",
-                        steps: &steps
-                    )
-                    let token = try topLogit(logits)
-                    recordStep(
-                        "Top logits token \(step)",
-                        detail: topLogitsSummary(logits, count: 5),
-                        steps: &steps
-                    )
-                    recordStep(
-                        "Generated token \(step)",
-                        detail: "#\(token.index) logit=\(String(format: "%.3f", token.logit))",
-                        steps: &steps
-                    )
-                    return TokenPrediction(step: step, index: token.index, logit: token.logit)
-                }
-                appendStep(ProbeStep(
-                    name: "Token \(step) total",
-                    seconds: Date().timeIntervalSince(tokenStart),
-                    memoryMB: ProbeMemory.currentMB(),
-                    detail: "#\(prediction.index) logit=\(String(format: "%.3f", prediction.logit))"
-                ), to: &steps)
-
-                if cacheClearPolicy == .afterEachToken {
-                    clearCoreMLRuntimeCache(reason: "generated token \(step) policy=\(cacheClearPolicy.rawValue)", steps: &steps)
-                }
-
-                localPredictions.append(prediction)
-
-                if let stopReason = generationStopReason(predictions: localPredictions, latestTokenID: prediction.index) {
-                    recordStep("Stop generation", detail: stopReason, steps: &steps)
-                    break
-                }
-
-                guard let nextToken = Int32(exactly: prediction.index) else {
-                    throw ProbeError.invalidInputIDs("generated token does not fit Int32: \(prediction.index)")
-                }
-                inputWindow.values.removeFirst()
-                inputWindow.values.append(nextToken)
-                if inputWindow.leftPadCount > 0 {
-                    inputWindow.leftPadCount -= 1
-                } else {
-                    inputWindow.positionStart += 1
-                }
+        // One-shot path (benchmarks): load, run, release — bounded lifetime.
+        let predictions = try autoreleasepool { () throws -> [TokenPrediction] in
+            let models = LoadedChatModels(
+                embedding: try loadModel(named: sequenceLength.embeddingName, config: makeEmbeddingConfig(), steps: &steps),
+                lmHead: try loadLMHead(config: endpointConfig, steps: &steps),
+                retained: try loadRetainedDecoderModels(
+                    plan: decoderPlan,
+                    requestedCount: retainedDecoderCount,
+                    config: decoderConfig,
+                    sequenceLength: sequenceLength,
+                    steps: &steps
+                )
+            )
+            let localPredictions = try runTokenLoop(
+                models: models,
+                decoderPlan: decoderPlan,
+                inputWindow: &inputWindow,
+                tokenCount: tokenCount,
+                imageHidden: imageHidden,
+                imageStartPosition: imageStartPosition,
+                sequenceLength: sequenceLength,
+                decoderConfig: decoderConfig,
+                layerSelection: layerSelection,
+                cacheClearPolicy: cacheClearPolicy,
+                onToken: onToken,
+                steps: &steps
+            )
+            recordStep("Released generation endpoints", detail: "\(sequenceLength.embeddingName), \(models.lmHead.name)", steps: &steps)
+            if !models.retained.names.isEmpty {
+                recordStep("Released retained decoders", detail: models.retained.names.joined(separator: ","), steps: &steps)
             }
-
-            return (localPredictions, lmHead.name, retainedDecoders.names)
+            return localPredictions
         }
 
-        let predictions = generationResult.predictions
-        recordStep("Released generation endpoints", detail: "\(sequenceLength.embeddingName), \(generationResult.lmHeadName)", steps: &steps)
-        if !generationResult.retainedDecoderNames.isEmpty {
-            recordStep("Released retained decoders", detail: generationResult.retainedDecoderNames.joined(separator: ","), steps: &steps)
-        }
         if cacheClearPolicy.clearsAfterNonDecoderRelease {
             clearCoreMLRuntimeCache(reason: "released generation endpoints", steps: &steps)
         }
+        recordGeneratedTokens(predictions, steps: &steps)
+        return predictions
+    }
+
+    private static func recordGeneratedTokens(_ predictions: [TokenPrediction], steps: inout [ProbeStep]) {
         let detail = predictions
             .map { "\($0.step):#\($0.index)=\(String(format: "%.3f", $0.logit))" }
             .joined(separator: ", ")
         recordStep("Generated tokens", detail: detail, steps: &steps)
-        return predictions
+    }
+
+    private static func runTokenLoop(
+        models: LoadedChatModels,
+        decoderPlan: DecoderLayerPlan,
+        inputWindow: inout TokenWindow,
+        tokenCount: Int,
+        imageHidden: MLMultiArray?,
+        imageStartPosition: Int,
+        sequenceLength: ProbeSequenceLength,
+        decoderConfig: MLModelConfiguration,
+        layerSelection: ProbeLayerSelection,
+        cacheClearPolicy: ProbeCacheClearPolicy,
+        onToken: ((Int) -> Void)? = nil,
+        steps: inout [ProbeStep]
+    ) throws -> [TokenPrediction] {
+        var localPredictions: [TokenPrediction] = []
+        // Window-relative start of the image-hidden block; slides left as
+        // generated tokens push the window forward, until it falls off.
+        var imageWindowStart = imageStartPosition
+
+        for step in 1...tokenCount {
+            let tokenStart = Date()
+            let prediction = try autoreleasepool { () throws -> TokenPrediction in
+                recordStep(
+                    "Prompt IDs \(step)",
+                    detail: "\(formatInputIDs(inputWindow.values)) positionStart=\(inputWindow.positionStart) leftPad=\(inputWindow.leftPadCount)",
+                    steps: &steps
+                )
+                if let repeatedToken = repeatedToken(in: inputWindow.values) {
+                    recordStep(
+                        "Repeated input window \(step)",
+                        detail: "#\(repeatedToken) repeated across all \(sequenceLength.rawValue) positions",
+                        steps: &steps
+                    )
+                }
+                let hidden = try predictEmbedding(
+                    model: models.embedding,
+                    inputIDs: inputWindow.values,
+                    name: "Embedding token \(step)",
+                    steps: &steps
+                )
+                if let imageHidden {
+                    let overlaid = try overlayImageHidden(
+                        imageHidden,
+                        into: hidden,
+                        windowStart: imageWindowStart,
+                        seqLength: sequenceLength.rawValue
+                    )
+                    if overlaid > 0 {
+                        recordStep(
+                            "Image hidden overlay \(step)",
+                            detail: "patches=\(overlaid) windowStart=\(imageWindowStart)",
+                            steps: &steps
+                        )
+                    }
+                }
+                let decoded = try runDecoderStack(
+                    hidden: hidden,
+                    config: decoderConfig,
+                    layerSelection: layerSelection,
+                    sequenceLength: sequenceLength,
+                    positionStart: inputWindow.positionStart,
+                    leftPadCount: inputWindow.leftPadCount,
+                    cacheClearPolicy: cacheClearPolicy,
+                    providedPlan: decoderPlan,
+                    retainedDecoders: models.retained.models,
+                    steps: &steps
+                )
+                let lastHidden = try copyLastToken(from: decoded, sequenceLength: sequenceLength)
+                let logits = try predictLMHead(
+                    model: models.lmHead.model,
+                    hidden: lastHidden,
+                    name: "LM head token \(step)",
+                    steps: &steps
+                )
+                let token = try topLogit(logits)
+                recordStep(
+                    "Top logits token \(step)",
+                    detail: topLogitsSummary(logits, count: 5),
+                    steps: &steps
+                )
+                recordStep(
+                    "Generated token \(step)",
+                    detail: "#\(token.index) logit=\(String(format: "%.3f", token.logit))",
+                    steps: &steps
+                )
+                return TokenPrediction(step: step, index: token.index, logit: token.logit)
+            }
+            appendStep(ProbeStep(
+                name: "Token \(step) total",
+                seconds: Date().timeIntervalSince(tokenStart),
+                memoryMB: ProbeMemory.currentMB(),
+                detail: "#\(prediction.index) logit=\(String(format: "%.3f", prediction.logit))"
+            ), to: &steps)
+
+            if cacheClearPolicy == .afterEachToken {
+                clearCoreMLRuntimeCache(reason: "generated token \(step) policy=\(cacheClearPolicy.rawValue)", steps: &steps)
+            }
+
+            localPredictions.append(prediction)
+            onToken?(prediction.index)
+
+            if let stopReason = generationStopReason(predictions: localPredictions, latestTokenID: prediction.index) {
+                recordStep("Stop generation", detail: stopReason, steps: &steps)
+                break
+            }
+
+            guard let nextToken = Int32(exactly: prediction.index) else {
+                throw ProbeError.invalidInputIDs("generated token does not fit Int32: \(prediction.index)")
+            }
+            inputWindow.values.removeFirst()
+            inputWindow.values.append(nextToken)
+            imageWindowStart -= 1
+            if inputWindow.leftPadCount > 0 {
+                inputWindow.leftPadCount -= 1
+            } else {
+                inputWindow.positionStart += 1
+            }
+        }
+
+        return localPredictions
     }
 
     private static func runMultimodalSmoke(
@@ -1319,6 +1728,191 @@ enum ProbeRunner {
         return audioHidden
     }
 
+    /// Loads decoder chunks one at a time and keeps every one resident (no
+    /// release, no cache clear), running one forward per chunk to force the
+    /// weights fully into memory. After each chunk it logs the process
+    /// footprint and the kernel-reported headroom, stopping before the
+    /// available budget drops under the safety margin so the OS never jetsams
+    /// the app. The result answers "how many 4-layer decoder chunks fit
+    /// resident with margin on this device" — the measurement needed before
+    /// switching the generation loop from reload-every-token to resident.
+    private static func runMemoryRamp(
+        decoderConfig: MLModelConfiguration,
+        layerSelection: ProbeLayerSelection,
+        sequenceLength: ProbeSequenceLength,
+        steps: inout [ProbeStep]
+    ) throws -> String {
+        let plan = try decoderLayerPlan(selection: layerSelection, sequenceLength: sequenceLength)
+        let marginMB = selectedMemoryMarginMB()
+        recordStep(
+            "Memory ramp",
+            detail: "chunks=\(plan.layers.count) variant=\(ProbeSequenceLength.decoderVariant) marginMB=\(marginMB) strategy=load+predict+retain compute=\(decoderConfig.computeUnits.rawValue)",
+            steps: &steps
+        )
+        recordMemory("Ramp baseline", steps: &steps)
+
+        // Definitive backend evidence for the first chunk: MLComputePlan reports
+        // the preferred compute device per op, so "did this variant escape
+        // BNNS/CPU" is answered directly instead of inferred from timings.
+        if let firstLayer = plan.layers.first, let url = modelURL(named: firstLayer.name) {
+            let start = Date()
+            let summary = computePlanDeviceSummary(url: url, config: decoderConfig)
+            appendStep(ProbeStep(
+                name: "Compute plan \(firstLayer.title)",
+                seconds: Date().timeIntervalSince(start),
+                memoryMB: ProbeMemory.currentMB(),
+                detail: summary
+            ), to: &steps)
+        }
+
+        // Reused decoder inputs; the payload is synthetic because we only care
+        // about the memory footprint of holding the weights resident, not the
+        // logits.
+        let hidden = try makeHidden(seqLength: sequenceLength.rawValue)
+        let positionIDs = try makePositionIDs(seqLength: sequenceLength.rawValue, start: 0, leftPadCount: 0)
+        let mask = try makeCausalMask(seqLength: sequenceLength.rawValue, leftPadCount: 0)
+
+        var resident: [MLModel] = []
+        var stopReason = "loaded all \(plan.layers.count) chunks resident"
+
+        for layer in plan.layers {
+            let available = ProbeMemory.availableMB()
+            if available >= 0, available < Double(marginMB) {
+                stopReason = "stopped before \(layer.title): available \(String(format: "%.1f", available))MB < margin \(marginMB)MB"
+                recordStep("Ramp stop", detail: stopReason, steps: &steps)
+                break
+            }
+
+            let model = try loadModel(named: layer.name, config: decoderConfig, steps: &steps)
+            let output = try timedPrediction(
+                name: "Ramp predict \(layer.title)",
+                model: model,
+                provider: MLDictionaryFeatureProvider(dictionary: [
+                    "x": MLFeatureValue(multiArray: hidden),
+                    "position_ids": MLFeatureValue(multiArray: positionIDs),
+                    "attention_mask": MLFeatureValue(multiArray: mask)
+                ]),
+                steps: &steps
+            )
+            _ = try requireArray(named: "y", output: output)
+            resident.append(model)
+            recordMemory("Resident \(resident.count)/\(plan.layers.count) layers \(layer.title)", steps: &steps)
+        }
+
+        let residentCount = resident.count
+        // Keep the models alive across the measurement, then release together so
+        // the footprint numbers above reflect true concurrent residency.
+        withExtendedLifetime(resident) {}
+        resident.removeAll()
+        recordStep("Released ramp decoders", detail: "released \(residentCount) resident chunk(s)", steps: &steps)
+
+        let summary = "OK: resident \(residentCount)/\(plan.layers.count) chunks (\(residentCount * 4) layers) — \(stopReason)"
+        recordStep("Memory ramp result", detail: summary, steps: &steps)
+        return summary
+    }
+
+    /// Loads the MLComputePlan for a compiled model and counts operations per
+    /// preferred compute device (CPU/GPU/ANE). Blocks the calling probe thread
+    /// until the async plan load finishes; acceptable for a one-shot diagnostic.
+    private static func computePlanDeviceSummary(url: URL, config: MLModelConfiguration) -> String {
+        let semaphore = DispatchSemaphore(value: 0)
+        var summary = "unavailable"
+        Task {
+            defer { semaphore.signal() }
+            do {
+                let plan = try await MLComputePlan.load(contentsOf: url, configuration: config)
+                guard case .program(let program) = plan.modelStructure,
+                      let mainFunction = program.functions["main"] else {
+                    summary = "unsupported model structure"
+                    return
+                }
+                var counts: [String: Int] = [:]
+                for operation in mainFunction.block.operations {
+                    guard let usage = plan.deviceUsage(for: operation) else { continue }
+                    let device: String
+                    switch usage.preferred {
+                    case .cpu: device = "CPU"
+                    case .gpu: device = "GPU"
+                    case .neuralEngine: device = "ANE"
+                    @unknown default: device = "other"
+                    }
+                    counts[device, default: 0] += 1
+                }
+                summary = counts.isEmpty
+                    ? "no device usage reported"
+                    : "preferred ops " + counts
+                        .sorted { $0.value > $1.value }
+                        .map { "\($0.key)=\($0.value)" }
+                        .joined(separator: " ")
+            } catch {
+                summary = "compute plan failed: \(error.localizedDescription)"
+            }
+        }
+        semaphore.wait()
+        return summary
+    }
+
+    private static func recordMemory(_ name: String, steps: inout [ProbeStep]) {
+        let available = ProbeMemory.availableMB()
+        let detail = available >= 0
+            ? "available \(String(format: "%.1f", available)) MB before jetsam"
+            : "available unknown (process not memory-limited; run untethered)"
+        recordStep(name, detail: detail, steps: &steps)
+    }
+
+    /// `COREML_PROBE_WARM_MODEL=<name>` (or `--warm-model=`) makes the
+    /// load-decoder mode load an arbitrary bundled model by exact name,
+    /// bypassing the contiguous-coverage decoder plan. Used for one-off
+    /// diagnostics such as "does a single full-attention layer compile for the
+    /// ANE" where the asset does not participate in a full 0..47 plan.
+    private static func warmModelName() throws -> String? {
+        let environment = ProcessInfo.processInfo.environment
+        let prefix = "--warm-model="
+        let raw = environment["COREML_PROBE_WARM_MODEL"]
+            ?? ProcessInfo.processInfo.arguments
+                .first(where: { $0.hasPrefix(prefix) })
+                .map { String($0.dropFirst(prefix.count)) }
+        guard let raw, !raw.isEmpty else { return nil }
+        guard modelURL(named: raw) != nil else {
+            throw ProbeError.missingModel(raw)
+        }
+        return raw
+    }
+
+    /// `COREML_PROBE_WARM_CHUNK=<startLayer>` (or `--warm-chunk=`) makes the
+    /// load-decoder mode load exactly the decoder bundle starting at that layer
+    /// index instead of layer 0. Used to warm the e5rt ANE-compilation cache
+    /// one model per app launch, because compiling a second large ANE model in
+    /// the same launch gets the process jetsammed.
+    private static func warmChunkName(sequenceLength: ProbeSequenceLength) throws -> String? {
+        let environment = ProcessInfo.processInfo.environment
+        let prefix = "--warm-chunk="
+        let raw = environment["COREML_PROBE_WARM_CHUNK"]
+            ?? ProcessInfo.processInfo.arguments
+                .first(where: { $0.hasPrefix(prefix) })
+                .map { String($0.dropFirst(prefix.count)) }
+        guard let raw, let startIndex = Int(raw) else { return nil }
+
+        let plan = try decoderLayerPlan(selection: .all, sequenceLength: sequenceLength)
+        guard let layer = plan.layers.first(where: { $0.startIndex == startIndex }) else {
+            throw ProbeError.missingModel("decoder chunk starting at layer \(startIndex) for seq\(sequenceLength.rawValue)")
+        }
+        return layer.name
+    }
+
+    private static func selectedMemoryMarginMB() -> Int {
+        let environment = ProcessInfo.processInfo.environment
+        let prefix = "--memory-margin="
+        let raw = environment["COREML_PROBE_MEMORY_MARGIN_MB"]
+            ?? ProcessInfo.processInfo.arguments
+                .first(where: { $0.hasPrefix(prefix) })
+                .map { String($0.dropFirst(prefix.count)) }
+        guard let raw, let value = Int(raw), value >= 0 else {
+            return defaultMemoryMarginMB
+        }
+        return value
+    }
+
     private static func generationStopReason(predictions: [TokenPrediction], latestTokenID: Int) -> String? {
         if generatedStopTokenIDs.contains(latestTokenID) {
             return "stop token #\(latestTokenID)"
@@ -1394,7 +1988,7 @@ enum ProbeRunner {
             if let retainedModel {
                 decoder = retainedModel
             } else {
-                decoder = try loadModel(named: layer.name, config: config, steps: &steps)
+                decoder = try loadModel(named: layer.name, config: decoderLoadConfig(for: layer, base: config), steps: &steps)
             }
             let positionIDs = try makePositionIDs(seqLength: sequenceLength.rawValue, start: positionStart, leftPadCount: leftPadCount)
             let mask = try makeCausalMask(seqLength: sequenceLength.rawValue, leftPadCount: leftPadCount)
@@ -1425,6 +2019,7 @@ enum ProbeRunner {
         plan: DecoderLayerPlan,
         requestedCount: Int,
         config: MLModelConfiguration,
+        sequenceLength: ProbeSequenceLength,
         steps: inout [ProbeStep]
     ) throws -> RetainedDecoderModels {
         guard requestedCount > 0 else {
@@ -1432,20 +2027,56 @@ enum ProbeRunner {
         }
 
         let targetCount = min(requestedCount, plan.layers.count)
+        let marginMB = selectedMemoryMarginMB()
         recordStep(
             "Retain decoder models",
-            detail: "requested=\(requestedCount) retaining=\(targetCount) of \(plan.layers.count)",
+            detail: "requested=\(requestedCount) retaining=\(targetCount) of \(plan.layers.count) marginMB=\(marginMB)",
             steps: &steps
         )
+
+        // Warmup inputs: on the A15 Neural Engine, loading ~24+ pal4 models
+        // back-to-back WITHOUT exercising them stalls the ANE loader (observed
+        // hang on iPhone 14). Running one synthetic prediction right after each
+        // load commits the model on the ANE and avoids the stall — the same
+        // load→predict cadence the memory-ramp probe uses to reach 36 resident.
+        let warmHidden = try makeHidden(seqLength: sequenceLength.rawValue)
+        let warmPositions = try makePositionIDs(seqLength: sequenceLength.rawValue, start: 0, leftPadCount: 0)
+        let warmMask = try makeCausalMask(seqLength: sequenceLength.rawValue, leftPadCount: 0)
+        let warmProvider = try MLDictionaryFeatureProvider(dictionary: [
+            "x": MLFeatureValue(multiArray: warmHidden),
+            "position_ids": MLFeatureValue(multiArray: warmPositions),
+            "attention_mask": MLFeatureValue(multiArray: warmMask)
+        ])
 
         var models: [String: MLModel] = [:]
         var names: [String] = []
         for layer in plan.layers.prefix(targetCount) {
-            models[layer.name] = try loadModel(named: layer.name, config: config, steps: &steps)
+            // Stop retaining before the process crosses its jetsam margin. Each
+            // resident chunk is ~495 MB, so over-requesting on a device without
+            // the increased-memory-limit entitlement would otherwise get the app
+            // killed. Chunks left unretained simply reload per token as before.
+            let available = ProbeMemory.availableMB()
+            if available >= 0, available < Double(marginMB) {
+                recordStep(
+                    "Retain stop",
+                    detail: "retained \(names.count)/\(targetCount): available \(String(format: "%.1f", available))MB < margin \(marginMB)MB; remaining chunks reload per token",
+                    steps: &steps
+                )
+                break
+            }
+            let model = try loadModel(named: layer.name, config: decoderLoadConfig(for: layer, base: config), steps: &steps)
+            try autoreleasepool {
+                _ = try model.prediction(from: warmProvider)
+            }
+            models[layer.name] = model
             names.append(layer.name)
         }
 
-        recordStep("Retained decoder models", detail: names.joined(separator: ","), steps: &steps)
+        recordStep(
+            "Retained decoder models",
+            detail: names.isEmpty ? "none (memory margin reached before any retained)" : "\(names.count) warmed+resident",
+            steps: &steps
+        )
         return RetainedDecoderModels(models: models, names: names)
     }
 
@@ -1577,7 +2208,30 @@ enum ProbeRunner {
         return try requireArray(named: "logits", output: output)
     }
 
+    /// When set (env `COREML_PROBE_KEEP_E5_CACHE=1` or `--keep-e5-cache`), the
+    /// e5rt ANE-compilation cache survives across runs. Required for the pal4
+    /// ANE assets: recompiling a dozen ~450MB models in one launch spikes
+    /// transient memory during ANECompilerService handoff and gets the app
+    /// jetsammed (SIGKILL) long before phys_footprint shows pressure. With the
+    /// cache kept, each model compiles once and later launches reuse binaries.
+    static let keepsE5Cache: Bool = {
+        let environment = ProcessInfo.processInfo.environment
+        if let value = environment["COREML_PROBE_KEEP_E5_CACHE"] {
+            return ["1", "true", "yes", "on"].contains(value.lowercased())
+        }
+        if ProcessInfo.processInfo.arguments.contains("--keep-e5-cache") {
+            return true
+        }
+        // Default on for the pal4/ANE stack: clearing the cache forces a full
+        // ANE recompilation of every model on the next launch.
+        return ProbeSequenceLength.usesPal4Stack
+    }()
+
     private static func clearCoreMLRuntimeCache(reason: String, steps: inout [ProbeStep]) {
+        if keepsE5Cache {
+            recordStep("Keep Core ML cache", detail: "skipped clear (reason=\(reason)) keep-e5-cache enabled", steps: &steps)
+            return
+        }
         let fileManager = FileManager.default
         let start = Date()
         let targets = coreMLRuntimeCacheTargets(fileManager: fileManager)
@@ -1806,6 +2460,125 @@ enum ProbeRunner {
         return array
     }
 
+    /// Writes image-hidden patch vectors into a sequence-hidden buffer at a
+    /// window-relative start offset (which may be negative once the block has
+    /// partially slid out of the window). Returns the number of patches that
+    /// landed inside the window.
+    @discardableResult
+    private static func overlayImageHidden(
+        _ imageHidden: MLMultiArray,
+        into hidden: MLMultiArray,
+        windowStart: Int,
+        seqLength: Int
+    ) throws -> Int {
+        let hiddenSize = 3840
+        guard imageHidden.dataType == .float16, hidden.dataType == .float16 else {
+            throw ProbeError.unexpectedShape("image overlay requires float16 hidden buffers")
+        }
+        let patchCount = imageHidden.count / hiddenSize
+        let source = imageHidden.dataPointer.bindMemory(to: Float16.self, capacity: imageHidden.count)
+        let destination = hidden.dataPointer.bindMemory(to: Float16.self, capacity: hidden.count)
+        // Experimental scale knob: the merged image tokens must sit at the same
+        // magnitude as the ×sqrt(hidden) text embeddings. scale=1 uses the raw
+        // embedder output; other values let us A/B the scale hypothesis on
+        // device without reconverting the embedder.
+        let scale = imageHiddenScale
+        var written = 0
+        for patch in 0..<patchCount {
+            let position = windowStart + patch
+            guard position >= 0, position < seqLength else { continue }
+            let sourceBase = patch * hiddenSize
+            let destinationBase = position * hiddenSize
+            if scale == 1 {
+                for index in 0..<hiddenSize {
+                    destination[destinationBase + index] = source[sourceBase + index]
+                }
+            } else {
+                for index in 0..<hiddenSize {
+                    destination[destinationBase + index] = Float16(Float(source[sourceBase + index]) * scale)
+                }
+            }
+            written += 1
+        }
+        return written
+    }
+
+    /// Runs the bundled Gemma4 image embedder over caller-supplied pixel
+    /// patches ([1, 32, 6912] fp32, values normalized to [-1, 1]) and returns
+    /// `image_hidden` [1, 32, 3840] fp16 for overlay into the decoder input.
+    /// Loads the embedder on CPU (it is small: ~39MB, predict ~0.02s).
+    static func encodeImage(pixelValues: MLMultiArray) throws -> MLMultiArray {
+        var steps: [ProbeStep] = []
+        let positionIDs = try makeImageSmokePositionIDs()
+        return try autoreleasepool {
+            let imageEmbedder = try loadModel(named: imageEmbedderName, config: makeConfig(.cpuOnly), steps: &steps)
+            let output = try timedPrediction(
+                name: "Image embedder (chat)",
+                model: imageEmbedder,
+                provider: MLDictionaryFeatureProvider(dictionary: [
+                    "pixel_values": MLFeatureValue(multiArray: pixelValues),
+                    "image_position_ids": MLFeatureValue(multiArray: positionIDs)
+                ]),
+                steps: &steps
+            )
+            // The fp32-compute embedder can hand back a float32 array even
+            // though the spec declares fp16; normalize so the overlay (which
+            // binds Float16) works either way.
+            let imageHidden = try float16Copy(of: requireArray(named: "image_hidden", output: output))
+            logImageHiddenStats(imageHidden)
+            return imageHidden
+        }
+    }
+
+    private static func float16Copy(of array: MLMultiArray) throws -> MLMultiArray {
+        if array.dataType == .float16 { return array }
+        guard array.dataType == .float32 else {
+            throw ProbeError.unexpectedShape("expected float16/float32 image_hidden, got \(array.dataType)")
+        }
+        let copy = try MLMultiArray(shape: array.shape, dataType: .float16)
+        let source = array.dataPointer.bindMemory(to: Float.self, capacity: array.count)
+        let destination = copy.dataPointer.bindMemory(to: Float16.self, capacity: copy.count)
+        for index in 0..<array.count {
+            destination[index] = Float16(source[index])
+        }
+        return copy
+    }
+
+    /// One-line scale diagnostic for the image path: exploded hiddens saturate
+    /// the softcapped lm_head (every top logit pinned at ~29.97), so the
+    /// magnitude here tells us whether pixel normalization matches training.
+    private static func logImageHiddenStats(_ array: MLMultiArray) {
+        guard array.dataType == .float16 else { return }
+        let pointer = array.dataPointer.bindMemory(to: Float16.self, capacity: array.count)
+        var maxAbs: Float = 0
+        var sum: Float = 0
+        for index in 0..<array.count {
+            let value = Float(pointer[index])
+            maxAbs = max(maxAbs, abs(value))
+            sum += value
+        }
+        let line = "[CoreMLProbe] Image hidden stats maxAbs=\(maxAbs) mean=\(sum / Float(array.count)) count=\(array.count) scale=\(imageHiddenScale)"
+        print(line)
+        appendToStepFile(line)
+        // encodeImage runs before run() calls resetStepFile(), so also stash the
+        // line and let run() re-append it after the reset.
+        pendingImageStatsLine = line
+    }
+
+    static let imagePatchCount = imageSmokePatchCount
+    static let imagePatchDim = imageSmokePatchDim
+
+    /// Multiplier applied to image_hidden vectors before they overlay the text
+    /// embedding sequence. Defaults from `COREML_PROBE_IMAGE_SCALE` (else 1.0)
+    /// and can be overridden per request via the `/generate` API `image_scale`.
+    static var imageHiddenScale: Float = {
+        ProcessInfo.processInfo.environment["COREML_PROBE_IMAGE_SCALE"].flatMap { Float($0) } ?? 1.0
+    }()
+
+    /// Image-hidden diagnostic line, stashed so it survives `resetStepFile()`
+    /// (encodeImage runs before run() resets the step log).
+    static var pendingImageStatsLine: String?
+
     private static func copyImageHidden(
         _ imageHidden: MLMultiArray,
         intoSequenceHidden sequenceHidden: MLMultiArray,
@@ -1941,7 +2714,7 @@ enum ProbeRunner {
     }
 
     private static func selectedGeneratedTokenCount(override: Int?) throws -> Int {
-        let count: Int
+        var count: Int
         if let override {
             count = override
         } else if let rawValue = processGeneratedTokenCountText(), let parsed = Int(rawValue) {
@@ -1950,8 +2723,13 @@ enum ProbeRunner {
             count = defaultGeneratedTokenCount
         }
 
+        // 0 = auto: run to the safety cap and stop early on <eos>.
+        if count <= autoGeneratedTokenCount {
+            count = autoGeneratedTokenCap
+        }
+
         guard (1...maxGeneratedTokenCount).contains(count) else {
-            throw ProbeError.invalidTokenCount("expected 1...\(maxGeneratedTokenCount), got \(count)")
+            throw ProbeError.invalidTokenCount("expected \(autoGeneratedTokenCount) (auto) or 1...\(maxGeneratedTokenCount), got \(count)")
         }
         return count
     }

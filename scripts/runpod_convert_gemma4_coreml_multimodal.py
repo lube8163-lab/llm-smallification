@@ -69,6 +69,7 @@ def convert_package(
     block_size: int,
     keep_fp16: bool,
     force: bool,
+    compute_precision: ct.precision = ct.precision.FLOAT16,
 ) -> None:
     fp16_path = out_dir / f"{name}_fp16.mlpackage"
     int4_path = out_dir / f"{name}_int4_block{block_size}.mlpackage"
@@ -93,7 +94,7 @@ def convert_package(
         inputs=input_types,
         outputs=[ct.TensorType(name=output_name, dtype=np.float16)],
         minimum_deployment_target=ct.target.iOS18,
-        compute_precision=ct.precision.FLOAT16,
+        compute_precision=compute_precision,
     )
 
     if keep_fp16:
@@ -144,6 +145,17 @@ def main() -> None:
         choices=["float16", "float32"],
         default="float16",
         help="Load/trace dtype. Use float32 if Core ML layer_norm dtype checks reject fp16 gamma/epsilon.",
+    )
+    parser.add_argument(
+        "--compute-precision",
+        choices=["float16", "float32"],
+        default="float32",
+        help=(
+            "Core ML compute precision. The vision embedder overflows fp16"
+            " (patch_dense output ~5e4, pos_norm output ~750 squared in its"
+            " RMSNorm) and silently emits all-zero image_hidden, so float32"
+            " is the safe default; weights still get int4-quantized."
+        ),
     )
     parser.add_argument("--keep-fp16", action="store_true")
     parser.add_argument("--force", action="store_true")
@@ -219,6 +231,7 @@ def main() -> None:
             block_size=args.block_size,
             keep_fp16=args.keep_fp16,
             force=args.force,
+            compute_precision=ct.precision.FLOAT32 if args.compute_precision == "float32" else ct.precision.FLOAT16,
         )
 
     if args.target in {"all", "audio"}:
@@ -240,6 +253,7 @@ def main() -> None:
             block_size=args.block_size,
             keep_fp16=args.keep_fp16,
             force=args.force,
+            compute_precision=ct.precision.FLOAT32 if args.compute_precision == "float32" else ct.precision.FLOAT16,
         )
 
     print("done", flush=True)

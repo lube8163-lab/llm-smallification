@@ -10,8 +10,14 @@
 		A10000000000000000000001 /* CoreMLProbeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000011 /* CoreMLProbeApp.swift */; };
 		A10000000000000000000002 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000012 /* ContentView.swift */; };
 		A10000000000000000000003 /* ProbeRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* ProbeRunner.swift */; };
+		A10000000000000000000007 /* HTTPControlServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000018 /* HTTPControlServer.swift */; };
 		A10000000000000000000004 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000014 /* Assets.xcassets */; };
 		A10000000000000000000005 /* Models in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000015 /* Models */; };
+		D10000000000000000000001 /* DiffusionProbeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000011 /* DiffusionProbeApp.swift */; };
+		D10000000000000000000002 /* DiffusionProbeContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000012 /* DiffusionProbeContentView.swift */; };
+		D10000000000000000000003 /* DiffusionProbeRunner.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000013 /* DiffusionProbeRunner.swift */; };
+		D10000000000000000000004 /* DiffusionBridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = D10000000000000000000015 /* DiffusionBridge.mm */; };
+		D10000000000000000000005 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000014 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -21,13 +27,27 @@
 		A10000000000000000000013 /* ProbeRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProbeRunner.swift; sourceTree = "<group>"; };
 		A10000000000000000000014 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000000000000000000015 /* Models */ = {isa = PBXFileReference; lastKnownFileType = folder; path = Models; sourceTree = "<group>"; };
+		A10000000000000000000016 /* CoreMLProbe.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = CoreMLProbe.entitlements; sourceTree = "<group>"; };
+		A10000000000000000000018 /* HTTPControlServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HTTPControlServer.swift; sourceTree = "<group>"; };
+		D10000000000000000000010 /* DiffusionProbe.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = DiffusionProbe.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		D10000000000000000000011 /* DiffusionProbeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffusionProbeApp.swift; sourceTree = "<group>"; };
+		D10000000000000000000012 /* DiffusionProbeContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffusionProbeContentView.swift; sourceTree = "<group>"; };
+		D10000000000000000000013 /* DiffusionProbeRunner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiffusionProbeRunner.swift; sourceTree = "<group>"; };
+		D10000000000000000000014 /* DiffusionBridge.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = DiffusionBridge.h; sourceTree = "<group>"; };
+		D10000000000000000000015 /* DiffusionBridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = DiffusionBridge.mm; sourceTree = "<group>"; };
+		D10000000000000000000016 /* DiffusionProbe-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "DiffusionProbe-Bridging-Header.h"; sourceTree = "<group>"; };
+		D10000000000000000000017 /* log.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = log.h; sourceTree = "<group>"; };
 /* End PBXFileReference section */
-
-/* Begin PBXFileSystemSynchronizedRootGroup section */
-/* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A10000000000000000000020 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D10000000000000000000020 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -41,6 +61,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000031 /* CoreMLProbe */,
+				D10000000000000000000031 /* DiffusionProbe */,
 				A10000000000000000000032 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -51,8 +72,10 @@
 				A10000000000000000000011 /* CoreMLProbeApp.swift */,
 				A10000000000000000000012 /* ContentView.swift */,
 				A10000000000000000000013 /* ProbeRunner.swift */,
+				A10000000000000000000018 /* HTTPControlServer.swift */,
 				A10000000000000000000014 /* Assets.xcassets */,
 				A10000000000000000000015 /* Models */,
+				A10000000000000000000016 /* CoreMLProbe.entitlements */,
 			);
 			path = CoreMLProbe;
 			sourceTree = "<group>";
@@ -63,6 +86,20 @@
 				A10000000000000000000010 /* CoreMLProbe.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		D10000000000000000000031 /* DiffusionProbe */ = {
+			isa = PBXGroup;
+			children = (
+				D10000000000000000000011 /* DiffusionProbeApp.swift */,
+				D10000000000000000000012 /* DiffusionProbeContentView.swift */,
+				D10000000000000000000013 /* DiffusionProbeRunner.swift */,
+				D10000000000000000000014 /* DiffusionBridge.h */,
+				D10000000000000000000015 /* DiffusionBridge.mm */,
+				D10000000000000000000016 /* DiffusionProbe-Bridging-Header.h */,
+				D10000000000000000000017 /* log.h */,
+			);
+			path = DiffusionProbe;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -88,6 +125,26 @@
 			productReference = A10000000000000000000010 /* CoreMLProbe.app */;
 			productType = "com.apple.product-type.application";
 		};
+		D10000000000000000000040 /* DiffusionProbe */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = D10000000000000000000060 /* Build configuration list for PBXNativeTarget "DiffusionProbe" */;
+			buildPhases = (
+				D10000000000000000000041 /* Sources */,
+				D10000000000000000000020 /* Frameworks */,
+				D10000000000000000000042 /* Resources */,
+				D10000000000000000000043 /* Clear Extended Attributes */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DiffusionProbe;
+			packageProductDependencies = (
+			);
+			productName = DiffusionProbe;
+			productReference = D10000000000000000000010 /* DiffusionProbe.app */;
+			productType = "com.apple.product-type.application";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -99,6 +156,9 @@
 				LastUpgradeCheck = 2650;
 				TargetAttributes = {
 					A10000000000000000000040 = {
+						CreatedOnToolsVersion = 26.5;
+					};
+					D10000000000000000000040 = {
 						CreatedOnToolsVersion = 26.5;
 					};
 				};
@@ -118,6 +178,7 @@
 			projectRoot = "";
 			targets = (
 				A10000000000000000000040 /* CoreMLProbe */,
+				D10000000000000000000040 /* DiffusionProbe */,
 			);
 		};
 /* End PBXProject section */
@@ -129,6 +190,14 @@
 			files = (
 				A10000000000000000000004 /* Assets.xcassets in Resources */,
 				A10000000000000000000005 /* Models in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D10000000000000000000042 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D10000000000000000000005 /* Assets.xcassets in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -152,7 +221,26 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "if [ -n \"$TARGET_BUILD_DIR\" ] && [ -n \"$WRAPPER_NAME\" ]; then\n  /usr/bin/xattr -cr \"$TARGET_BUILD_DIR/$WRAPPER_NAME\" 2>/dev/null || true\nfi\n";
+			shellScript = "if [ -n \"$TARGET_BUILD_DIR\" ] && [ -n \"$WRAPPER_NAME\" ]; then\n  APP_PATH=\"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\n  /usr/bin/xattr -cr \"$APP_PATH\" 2>/dev/null || true\n  /usr/bin/find \"$APP_PATH\" -mindepth 0 -exec /bin/sh -c '\n    for item do\n      /usr/bin/xattr -d com.apple.FinderInfo \"$item\" 2>/dev/null || true\n      /usr/bin/xattr -d \"com.apple.fileprovider.fpfs#P\" \"$item\" 2>/dev/null || true\n      /usr/bin/xattr -d com.apple.ResourceFork \"$item\" 2>/dev/null || true\n      /usr/bin/xattr -d com.apple.provenance \"$item\" 2>/dev/null || true\n    done\n  ' sh {} +\nfi\n";
+		};
+		D10000000000000000000043 /* Clear Extended Attributes */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Clear Extended Attributes";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "if [ -n \"$TARGET_BUILD_DIR\" ] && [ -n \"$WRAPPER_NAME\" ]; then\n  APP_PATH=\"$TARGET_BUILD_DIR/$WRAPPER_NAME\"\n  /usr/bin/xattr -cr \"$APP_PATH\" 2>/dev/null || true\n  /usr/bin/find \"$APP_PATH\" -mindepth 0 -exec /bin/sh -c '\n    for item do\n      /usr/bin/xattr -d com.apple.FinderInfo \"$item\" 2>/dev/null || true\n      /usr/bin/xattr -d \"com.apple.fileprovider.fpfs#P\" \"$item\" 2>/dev/null || true\n      /usr/bin/xattr -d com.apple.ResourceFork \"$item\" 2>/dev/null || true\n      /usr/bin/xattr -d com.apple.provenance \"$item\" 2>/dev/null || true\n    done\n  ' sh {} +\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -164,6 +252,18 @@
 				A10000000000000000000001 /* CoreMLProbeApp.swift in Sources */,
 				A10000000000000000000002 /* ContentView.swift in Sources */,
 				A10000000000000000000003 /* ProbeRunner.swift in Sources */,
+				A10000000000000000000007 /* HTTPControlServer.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D10000000000000000000041 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				D10000000000000000000001 /* DiffusionProbeApp.swift in Sources */,
+				D10000000000000000000002 /* DiffusionProbeContentView.swift in Sources */,
+				D10000000000000000000003 /* DiffusionProbeRunner.swift in Sources */,
+				D10000000000000000000004 /* DiffusionBridge.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -292,13 +392,15 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = CoreMLProbe/CoreMLProbe.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = YY58VZMU56;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = CoreMLProbe;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "同じWi-Fi上のMacからチャットAPI(ポート8765)を操作するために使用します。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -310,7 +412,7 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = "lab.lube8163.CoreMLProbe";
+				PRODUCT_BUNDLE_IDENTIFIER = lab.lube8163.CoreMLProbe;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -323,13 +425,15 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = CoreMLProbe/CoreMLProbe.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = YY58VZMU56;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SCRIPT_SANDBOXING = NO;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = CoreMLProbe;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "同じWi-Fi上のMacからチャットAPI(ポート8765)を操作するために使用します。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -341,9 +445,131 @@
 					"@executable_path/Frameworks",
 				);
 				MARKETING_VERSION = 0.1;
-				PRODUCT_BUNDLE_IDENTIFIER = "lab.lube8163.CoreMLProbe";
+				PRODUCT_BUNDLE_IDENTIFIER = lab.lube8163.CoreMLProbe;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+		D10000000000000000000061 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_CXX_LIBRARY = "libc++";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = YY58VZMU56;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/DiffusionProbe",
+					"$(SRCROOT)/../../external/llama.cpp/include",
+					"$(SRCROOT)/../../external/llama.cpp/ggml/include",
+					"$(SRCROOT)/../../external/llama.cpp/examples/diffusion",
+				);
+				INFOPLIST_KEY_CFBundleDisplayName = DiffusionProbe;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../../external/llama.cpp/build-ios-device-probe/src/Release-iphoneos",
+					"$(SRCROOT)/../../external/llama.cpp/build-ios-device-probe/ggml/src/Release-iphoneos",
+					"$(SRCROOT)/../../external/llama.cpp/build-ios-device-probe/ggml/src/ggml-metal/Release-iphoneos",
+					"$(SRCROOT)/../../external/llama.cpp/build-ios-device-probe/ggml/src/ggml-blas/Release-iphoneos",
+				);
+				MARKETING_VERSION = 0.1;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lllama",
+					"-lggml-metal",
+					"-lggml-blas",
+					"-lggml-cpu",
+					"-lggml-base",
+					"-lggml",
+					"-lc++",
+					"-framework",
+					Metal,
+					"-framework",
+					Accelerate,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = lab.lube8163.DiffusionProbe;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "DiffusionProbe/DiffusionProbe-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		D10000000000000000000062 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CLANG_CXX_LIBRARY = "libc++";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = YY58VZMU56;
+				ENABLE_PREVIEWS = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				HEADER_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/DiffusionProbe",
+					"$(SRCROOT)/../../external/llama.cpp/include",
+					"$(SRCROOT)/../../external/llama.cpp/ggml/include",
+					"$(SRCROOT)/../../external/llama.cpp/examples/diffusion",
+				);
+				INFOPLIST_KEY_CFBundleDisplayName = DiffusionProbe;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				IPHONEOS_DEPLOYMENT_TARGET = 18.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../../external/llama.cpp/build-ios-device-probe/src/Release-iphoneos",
+					"$(SRCROOT)/../../external/llama.cpp/build-ios-device-probe/ggml/src/Release-iphoneos",
+					"$(SRCROOT)/../../external/llama.cpp/build-ios-device-probe/ggml/src/ggml-metal/Release-iphoneos",
+					"$(SRCROOT)/../../external/llama.cpp/build-ios-device-probe/ggml/src/ggml-blas/Release-iphoneos",
+				);
+				MARKETING_VERSION = 0.1;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lllama",
+					"-lggml-metal",
+					"-lggml-blas",
+					"-lggml-cpu",
+					"-lggml-base",
+					"-lggml",
+					"-lc++",
+					"-framework",
+					Metal,
+					"-framework",
+					Accelerate,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = lab.lube8163.DiffusionProbe;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "DiffusionProbe/DiffusionProbe-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
@@ -366,6 +592,15 @@
 			buildConfigurations = (
 				A10000000000000000000061 /* Debug */,
 				A10000000000000000000062 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		D10000000000000000000060 /* Build configuration list for PBXNativeTarget "DiffusionProbe" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D10000000000000000000061 /* Debug */,
+				D10000000000000000000062 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

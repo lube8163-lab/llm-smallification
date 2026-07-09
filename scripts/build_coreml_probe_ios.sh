@@ -3,7 +3,12 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT="$ROOT_DIR/ios/CoreMLProbe/CoreMLProbe.xcodeproj"
-DERIVED_DATA="$ROOT_DIR/.derived-data/CoreMLProbe"
+# Derived data must live OUTSIDE the iCloud-synced Documents tree: the file
+# provider re-tags freshly copied bundle resources with FinderInfo/fpfs#P
+# attributes while codesign runs, failing the build with "resource fork,
+# Finder information, or similar detritus not allowed" (and needlessly syncing
+# a 13GB app bundle to iCloud on every build).
+DERIVED_DATA="${COREML_PROBE_DERIVED_DATA:-$HOME/Library/Caches/llm-smallification/CoreMLProbe}"
 DESTINATION="${1:-platform=iOS Simulator,name=iPhone 17,OS=26.5}"
 
 clear_packaging_xattrs() {
@@ -26,10 +31,15 @@ fi
 clear_packaging_xattrs "$DERIVED_DATA/Build/Products/Debug-iphoneos/CoreMLProbe.app"
 clear_packaging_xattrs "$DERIVED_DATA/Build/Products/Debug-iphonesimulator/CoreMLProbe.app"
 
+# -allowProvisioningUpdates lets xcodebuild register new capabilities from the
+# entitlements file (e.g. Increased Memory Limit) on the App ID and regenerate
+# the provisioning profile without opening the Xcode UI. Requires the Apple
+# Developer PLA to be accepted and Xcode to be signed in to the account.
 xcodebuild \
   -project "$PROJECT" \
   -scheme CoreMLProbe \
   -configuration Debug \
   -destination "$DESTINATION" \
   -derivedDataPath "$DERIVED_DATA" \
+  -allowProvisioningUpdates \
   build

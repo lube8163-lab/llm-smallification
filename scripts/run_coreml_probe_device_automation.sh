@@ -2,7 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DERIVED_DATA="$ROOT_DIR/.derived-data/CoreMLProbe"
+# Keep in sync with build_coreml_probe_ios.sh: outside iCloud (see comment there).
+DERIVED_DATA="${COREML_PROBE_DERIVED_DATA:-$HOME/Library/Caches/llm-smallification/CoreMLProbe}"
 APP_PATH="$DERIVED_DATA/Build/Products/Debug-iphoneos/CoreMLProbe.app"
 BUNDLE_ID="${BUNDLE_ID:-lab.lube8163.CoreMLProbe}"
 
@@ -19,6 +20,7 @@ MAX_PEAK_MB="${MAX_PEAK_MB:-900}"
 MIN_GENERATED_TOKENS="${MIN_GENERATED_TOKENS:-}"
 TOKENS="${COREML_PROBE_GENERATE_TOKENS:-}"
 RUN_MODE="${COREML_PROBE_MODE:-}"
+RETAIN="${COREML_PROBE_RETAIN_DECODERS:-0}"
 PROMPT="${COREML_PROBE_CHAT_PROMPT:-こんにちは。短く答えてください。}"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 LOG_DIR="${COREML_PROBE_AUTOMATION_LOG_DIR:-$DERIVED_DATA/DeviceAutomation/$TIMESTAMP}"
@@ -75,6 +77,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --tokens)
       TOKENS="$2"
+      shift 2
+      ;;
+    --retain)
+      RETAIN="$2"
       shift 2
       ;;
     --prompt)
@@ -176,6 +182,16 @@ case "$KIND" in
     MIN_GENERATED_TOKENS="${MIN_GENERATED_TOKENS:-1}"
     RUN_MODE="${RUN_MODE:-multimodal-smoke}"
     ;;
+  memory-ramp|memory|ramp|mem-ramp)
+    AUTORUN_KIND="memory-ramp"
+    TOKENS="${TOKENS:-1}"
+    MIN_GENERATED_TOKENS="${MIN_GENERATED_TOKENS:-0}"
+    RUN_MODE="${RUN_MODE:-memory-ramp}"
+    # The ramp intentionally holds many chunks resident (multi-GB peak) and
+    # generates no tokens, so the token/peak analyzer does not apply.
+    NO_ANALYZE=1
+    MAX_PEAK_MB="${MAX_PEAK_MB_OVERRIDE:-8192}"
+    ;;
   *)
     echo "unknown automation kind: $KIND" >&2
     usage >&2
@@ -236,6 +252,7 @@ echo "logs: $LOG_DIR"
 echo "seq: $SEQ_LEN"
 echo "layers: first-$EXPECTED_LAYERS"
 echo "tokens: $TOKENS"
+echo "retain: $RETAIN"
 
 if [[ "$SKIP_BUILD" == "1" ]]; then
   echo "skip build: reusing $APP_PATH"
@@ -261,14 +278,32 @@ fi
 
 export COREML_PROBE_AUTORUN="$AUTORUN_KIND"
 export COREML_PROBE_AUTO_EXIT=1
-export COREML_PROBE_ENDPOINT_COMPUTE=cpuOnly
-export COREML_PROBE_DECODER_COMPUTE=all
+export COREML_PROBE_ENDPOINT_COMPUTE="${ENDPOINT_COMPUTE:-cpuOnly}"
+export COREML_PROBE_DECODER_COMPUTE="${DECODER_COMPUTE:-all}"
+if [[ -n "${DECODER_VARIANT:-}" ]]; then
+  export COREML_PROBE_DECODER_VARIANT="$DECODER_VARIANT"
+fi
+if [[ -n "${ENDPOINT_VARIANT:-}" ]]; then
+  export COREML_PROBE_ENDPOINT_VARIANT="$ENDPOINT_VARIANT"
+fi
+if [[ -n "${KEEP_E5_CACHE:-}" ]]; then
+  export COREML_PROBE_KEEP_E5_CACHE="$KEEP_E5_CACHE"
+fi
+if [[ -n "${WARM_CHUNK:-}" ]]; then
+  export COREML_PROBE_WARM_CHUNK="$WARM_CHUNK"
+fi
+if [[ -n "${GPU_CHUNKS:-}" ]]; then
+  export COREML_PROBE_GPU_CHUNKS="$GPU_CHUNKS"
+fi
+if [[ -n "${WARM_MODEL:-}" ]]; then
+  export COREML_PROBE_WARM_MODEL="$WARM_MODEL"
+fi
 export COREML_PROBE_MODE="$RUN_MODE"
 export COREML_PROBE_LAYERS="first-$EXPECTED_LAYERS"
 export COREML_PROBE_CACHE_POLICY=run-end-only
 export COREML_PROBE_SEQ_LEN="$SEQ_LEN"
 export COREML_PROBE_GENERATE_TOKENS="$TOKENS"
-export COREML_PROBE_RETAIN_DECODERS=0
+export COREML_PROBE_RETAIN_DECODERS="$RETAIN"
 export COREML_PROBE_CHAT_PROMPT="$PROMPT"
 
 ENV_JSON="$(
@@ -287,6 +322,12 @@ keys = [
     "COREML_PROBE_SEQ_LEN",
     "COREML_PROBE_GENERATE_TOKENS",
     "COREML_PROBE_RETAIN_DECODERS",
+    "COREML_PROBE_DECODER_VARIANT",
+    "COREML_PROBE_ENDPOINT_VARIANT",
+    "COREML_PROBE_KEEP_E5_CACHE",
+    "COREML_PROBE_WARM_CHUNK",
+    "COREML_PROBE_GPU_CHUNKS",
+    "COREML_PROBE_WARM_MODEL",
     "COREML_PROBE_CHAT_PROMPT",
 ]
 print(json.dumps({key: os.environ[key] for key in keys if key in os.environ}))

@@ -1,6 +1,7 @@
 /external/llama.cpp/
 /models/
 /runpod-artifacts/
+/artifacts/
 /logs/*.log
 /logs/*.txt
 /logs/*.jsonl

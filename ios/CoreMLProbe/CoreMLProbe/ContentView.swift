@@ -1,7 +1,11 @@
+import CoreML
 import Darwin
+import PhotosUI
 import SwiftUI
+import UIKit
 
 enum AppTab: Hashable {
+    case simple
     case chat
     case probe
 }
@@ -14,6 +18,7 @@ enum AutomationRunKind: String {
     case multimodalSmoke = "multimodal-smoke"
     case imageSmoke = "image-smoke"
     case audioSmoke = "audio-smoke"
+    case memoryRamp = "memory-ramp"
     case chat
 
     var usesChat: Bool {
@@ -40,6 +45,8 @@ enum AutomationRunKind: String {
             return .audioSmoke
         case "multimodal-smoke", "synthetic-multimodal":
             return .multimodalSmoke
+        case "memory-ramp", "memory", "mem-ramp", "ramp":
+            return .memoryRamp
         case "chat", "chat-smoke":
             return .chat
         default:
@@ -111,16 +118,22 @@ struct ContentView: View {
     init() {
         let config = AutomationConfig.current()
         automationConfig = config
-        _selectedTab = State(initialValue: config.runKind?.usesChat == true ? .chat : (config.shouldRun ? .probe : .chat))
+        _selectedTab = State(initialValue: config.runKind?.usesChat == true ? .chat : (config.shouldRun ? .probe : .simple))
         _probeViewModel = StateObject(wrappedValue: ProbeViewModel())
         _chatViewModel = StateObject(wrappedValue: ChatViewModel())
     }
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            ChatScreen(viewModel: chatViewModel)
+            SimpleChatScreen(viewModel: chatViewModel)
                 .tabItem {
                     Label("Chat", systemImage: "bubble.left.and.bubble.right.fill")
+                }
+                .tag(AppTab.simple)
+
+            ChatScreen(viewModel: chatViewModel)
+                .tabItem {
+                    Label("Debug", systemImage: "wrench.and.screwdriver")
                 }
                 .tag(AppTab.chat)
 
@@ -131,12 +144,153 @@ struct ContentView: View {
                 .tag(AppTab.probe)
         }
         .task {
+            chatViewModel.startControlServerIfNeeded()
             if automationConfig.runKind?.usesChat == true {
                 chatViewModel.runIfRequested(automationConfig)
             } else {
                 probeViewModel.runIfRequested(automationConfig)
             }
         }
+    }
+}
+
+/// Plain consumer-style chat: bubbles with decoded text and images only.
+/// Token IDs, logits, compute settings, and step logs all live in the Debug
+/// tab; both screens share the same ChatViewModel and generation pipeline.
+struct SimpleChatScreen: View {
+    @ObservedObject var viewModel: ChatViewModel
+
+    var body: some View {
+        NavigationStack {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(spacing: 10) {
+                        if viewModel.messages.isEmpty {
+                            VStack(spacing: 8) {
+                                Image(systemName: "sparkles")
+                                    .font(.largeTitle)
+                                    .foregroundStyle(.secondary)
+                                Text("Gemma 4 12B（オンデバイス）")
+                                    .font(.headline)
+                                Text("テキストまたは画像付きで話しかけてください")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.top, 80)
+                        }
+
+                        ForEach(viewModel.messages) { message in
+                            SimpleChatBubble(message: message)
+                                .id(message.id)
+                        }
+
+                        if viewModel.isGenerating {
+                            HStack(spacing: 8) {
+                                ProgressView()
+                                Text("生成中…")
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                Spacer()
+                            }
+                            .padding(.horizontal, 16)
+                        } else if !viewModel.lastStatText.isEmpty {
+                            Text(viewModel.lastStatText)
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .center)
+                                .padding(.top, 2)
+                        }
+                    }
+                    .padding(.vertical, 12)
+                }
+                .onChange(of: viewModel.messages.count) { _, _ in
+                    if let last = viewModel.messages.last {
+                        withAnimation {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
+                .onChange(of: viewModel.streamTick) { _, _ in
+                    // Keep the growing reply pinned to the bottom while streaming.
+                    if let last = viewModel.messages.last {
+                        proxy.scrollTo(last.id, anchor: .bottom)
+                    }
+                }
+                .scrollDismissesKeyboard(.interactively)
+            }
+            .navigationTitle("Gemma Chat")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        viewModel.clear()
+                    } label: {
+                        Image(systemName: "square.and.pencil")
+                    }
+                    .disabled(viewModel.isGenerating)
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                ChatComposer(
+                    text: $viewModel.messageText,
+                    photoItem: $viewModel.photoItem,
+                    attachedImage: $viewModel.attachedImage,
+                    isGenerating: viewModel.isGenerating,
+                    send: {
+                        viewModel.send()
+                    }
+                )
+            }
+            .onChange(of: viewModel.photoItem) { _, item in
+                guard let item else { return }
+                Task {
+                    if let data = try? await item.loadTransferable(type: Data.self),
+                       let image = UIImage(data: data) {
+                        viewModel.attachedImage = image
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct SimpleChatBubble: View {
+    let message: ChatMessage
+
+    var body: some View {
+        HStack {
+            if message.role == .user {
+                Spacer(minLength: 56)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                if let image = message.image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(maxWidth: 200, maxHeight: 200)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+                Text(message.isError ? (message.detail ?? message.text) : message.text)
+                    .font(.body)
+                    .textSelection(.enabled)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .foregroundStyle(message.role == .user ? Color.white : Color.primary)
+            .background(
+                message.isError
+                    ? Color.red.opacity(0.15)
+                    : (message.role == .user ? Color.accentColor : Color(.secondarySystemBackground)),
+                in: RoundedRectangle(cornerRadius: 16)
+            )
+            .frame(maxWidth: 320, alignment: message.role == .user ? .trailing : .leading)
+
+            if message.role == .assistant {
+                Spacer(minLength: 56)
+            }
+        }
+        .padding(.horizontal, 12)
     }
 }
 
@@ -174,13 +328,13 @@ struct ChatScreen: View {
                     }
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Max Tokens")
+                        Text("応答の長さ（自動 = EOSまで、上限\(ProbeRunner.autoGeneratedTokenCap)）")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
 
                         Picker("Max Tokens", selection: $viewModel.generatedTokenCount) {
                             ForEach(ChatViewModel.generatedTokenPresets, id: \.self) { count in
-                                Text("\(count)").tag(count)
+                                Text(count == ProbeRunner.autoGeneratedTokenCount ? "自動" : "\(count)").tag(count)
                             }
                         }
                         .pickerStyle(.segmented)
@@ -191,6 +345,9 @@ struct ChatScreen: View {
                         LabeledContent("Retain Decoders", value: "\(viewModel.retainedDecoderModelCount)")
                     }
                     .disabled(viewModel.isGenerating)
+
+                    Toggle("Image norm [-1,1]", isOn: $viewModel.imageNormSigned)
+                        .disabled(viewModel.isGenerating)
 
                     Picker("Window", selection: $viewModel.sequenceLength) {
                         ForEach(ProbeSequenceLength.allCases) { sequenceLength in
@@ -235,6 +392,9 @@ struct ChatScreen: View {
 
                 Section("Status") {
                     LabeledContent("Memory", value: viewModel.currentMemoryText)
+                    if !viewModel.apiAddress.isEmpty {
+                        LabeledContent("API", value: viewModel.apiAddress)
+                    }
                     LabeledContent("Result", value: viewModel.summary)
                     if !viewModel.generatedTokenText.isEmpty {
                         LabeledContent("Tokens", value: viewModel.generatedTokenText)
@@ -253,6 +413,7 @@ struct ChatScreen: View {
                 }
             }
             .listStyle(.insetGrouped)
+            .scrollDismissesKeyboard(.interactively)
             .navigationTitle("Gemma Chat")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -267,11 +428,22 @@ struct ChatScreen: View {
             .safeAreaInset(edge: .bottom) {
                 ChatComposer(
                     text: $viewModel.messageText,
+                    photoItem: $viewModel.photoItem,
+                    attachedImage: $viewModel.attachedImage,
                     isGenerating: viewModel.isGenerating,
                     send: {
                         viewModel.send()
                     }
                 )
+            }
+            .onChange(of: viewModel.photoItem) { _, item in
+                guard let item else { return }
+                Task {
+                    if let data = try? await item.loadTransferable(type: Data.self),
+                       let image = UIImage(data: data) {
+                        viewModel.attachedImage = image
+                    }
+                }
             }
         }
     }
@@ -279,6 +451,8 @@ struct ChatScreen: View {
 
 struct ChatComposer: View {
     @Binding var text: String
+    @Binding var photoItem: PhotosPickerItem?
+    @Binding var attachedImage: UIImage?
     let isGenerating: Bool
     let send: () -> Void
     @FocusState private var isFocused: Bool
@@ -288,21 +462,40 @@ struct ChatComposer: View {
     }
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 10) {
-            Menu {
-                Button {
-                } label: {
-                    Label("Photo", systemImage: "photo")
+        VStack(spacing: 8) {
+            if let attachedImage {
+                HStack(spacing: 8) {
+                    Image(uiImage: attachedImage)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 44, height: 44)
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    Text("画像を添付済み（32パッチとしてモデルへ入力）")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        self.attachedImage = nil
+                        self.photoItem = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
                 }
-                .disabled(true)
+                .padding(.horizontal, 2)
+            }
 
-                Button {
-                } label: {
-                    Label("Audio", systemImage: "waveform")
-                }
-                .disabled(true)
-            } label: {
-                Image(systemName: "plus.circle.fill")
+            composerRow
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(.bar)
+    }
+
+    private var composerRow: some View {
+        HStack(alignment: .bottom, spacing: 10) {
+            PhotosPicker(selection: $photoItem, matching: .images) {
+                Image(systemName: attachedImage == nil ? "photo.badge.plus" : "photo.fill")
                     .font(.title3)
                     .frame(width: 36, height: 36)
             }
@@ -317,11 +510,27 @@ struct ChatComposer: View {
                 .background(Color(.secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
                 .onSubmit {
                     if canSend {
+                        isFocused = false
                         send()
+                    }
+                }
+                .toolbar {
+                    // A vertical-axis TextField turns Return into a newline, so
+                    // without this the software keyboard has no dismiss
+                    // affordance. Keep the dismiss button left-aligned so it
+                    // does not sit directly above the send button.
+                    ToolbarItemGroup(placement: .keyboard) {
+                        Button {
+                            isFocused = false
+                        } label: {
+                            Label("閉じる", systemImage: "keyboard.chevron.compact.down")
+                        }
+                        Spacer()
                     }
                 }
 
             Button {
+                isFocused = false
                 send()
             } label: {
                 Image(systemName: "paperplane.fill")
@@ -330,9 +539,6 @@ struct ChatComposer: View {
             .buttonStyle(.borderedProminent)
             .disabled(!canSend)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(.bar)
     }
 }
 
@@ -351,6 +557,14 @@ struct ChatMessageRow: View {
                     .foregroundStyle(.secondary)
 
                 VStack(alignment: .leading, spacing: 8) {
+                    if let image = message.image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(maxWidth: 180, maxHeight: 180)
+                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                    }
+
                     Text(message.text)
                         .font(.body)
                         .textSelection(.enabled)
@@ -701,12 +915,32 @@ enum ChatRole {
 }
 
 struct ChatMessage: Identifiable {
-    let id = UUID()
+    let id: UUID
     let role: ChatRole
-    let text: String
-    let tokens: [Int]
-    let detail: String?
-    let isError: Bool
+    // Mutable so a streaming assistant reply can grow in place under a stable id.
+    var text: String
+    var tokens: [Int]
+    var detail: String?
+    var isError: Bool
+    var image: UIImage? = nil
+
+    init(
+        id: UUID = UUID(),
+        role: ChatRole,
+        text: String,
+        tokens: [Int],
+        detail: String?,
+        isError: Bool,
+        image: UIImage? = nil
+    ) {
+        self.id = id
+        self.role = role
+        self.text = text
+        self.tokens = tokens
+        self.detail = detail
+        self.isError = isError
+        self.image = image
+    }
 }
 
 struct ProbeSweepCase {
@@ -768,11 +1002,28 @@ enum ProbeSweep {
             retainedDecoders: 0
         ),
         ProbeSweepCase(
-            title: "Retain 1",
+            title: "Retain 2",
             endpoint: .cpuOnly,
             decoder: .all,
             tokens: 8,
-            retainedDecoders: 1
+            retainedDecoders: 2
+        ),
+        ProbeSweepCase(
+            title: "Retain 4",
+            endpoint: .cpuOnly,
+            decoder: .all,
+            tokens: 8,
+            retainedDecoders: 4
+        ),
+        // Under the default (no-entitlement) ~3.3 GB ceiling this may hit the
+        // memory-margin valve and retain fewer than 6; that is expected and
+        // safe. With the increased-memory-limit entitlement it should hold all 6.
+        ProbeSweepCase(
+            title: "Retain 6",
+            endpoint: .cpuOnly,
+            decoder: .all,
+            tokens: 8,
+            retainedDecoders: 6
         )
     ]
 
@@ -886,6 +1137,46 @@ final class GemmaBPETokenizer {
         }
     }
 
+    /// Chat window with a run of placeholder positions reserved for image
+    /// hidden states: [pad][BOS user-header][image x N][prompt][turn tail].
+    /// Returns the ids plus the window index where the image block starts.
+    func encodeChatWindowWithImage(
+        prompt: String,
+        sequenceLength: ProbeSequenceLength,
+        imageTokenCount: Int
+    ) throws -> (ids: [Int32], imageStart: Int) {
+        let header: [Int32] = [2, 105, 2364, 107]
+        let tail: [Int32] = [106, 107, 105, 4368, 107, 100, 45518, 107, 101]
+        // Gemma 4 wraps image soft tokens with begin/end-of-image markers and
+        // fills the block with the image placeholder id (the merge replaces
+        // those positions' embeddings with vision features). The real <eoi>
+        // (258882) has a 5.7x-RMS embedding row that overflows the fp16
+        // decoder (all logits pin at the +30 softcap), so close the block
+        // with a newline instead.
+        let beginImage: Int32 = 255999   // <boi>
+        let imagePlaceholder: Int32 = 258880  // <image>
+        let endImage: Int32 = 107        // \n (avoid <eoi> 258882: fp16 overflow)
+        var promptIDs = try encodeText(prompt)
+        let budget = sequenceLength.rawValue - header.count - imageTokenCount - 2 - tail.count
+        guard budget >= 0 else {
+            throw ProbeError.invalidInputIDs(
+                "window \(sequenceLength.rawValue) too small for \(imageTokenCount) image tokens plus chat template"
+            )
+        }
+        if promptIDs.count > budget {
+            promptIDs = Array(promptIDs.prefix(budget))
+        }
+        var ids = header
+        ids.append(beginImage)
+        ids.append(contentsOf: [Int32](repeating: imagePlaceholder, count: imageTokenCount))
+        ids.append(endImage)
+        ids.append(contentsOf: promptIDs)
+        ids.append(contentsOf: tail)
+        let leftPad = sequenceLength.rawValue - ids.count
+        ids = [Int32](repeating: padTokenID, count: leftPad) + ids
+        return (ids, leftPad + header.count + 1)
+    }
+
     func encodeChatWindow(prompt: String, sequenceLength: ProbeSequenceLength) throws -> [Int32] {
         let ids = try encodeChat(prompt: prompt)
         if ids.count < sequenceLength.rawValue {
@@ -988,9 +1279,11 @@ final class GemmaTokenizerStore {
 
 @MainActor
 final class ChatViewModel: ObservableObject {
-    static let generatedTokenPresets = [8, 16, 32]
+    static let generatedTokenPresets = [ProbeRunner.autoGeneratedTokenCount, 64, 128, 256]
 
-    @Published var endpointComputeSelection = ProbeComputeSelection.selectedEndpointFromProcess(default: .cpuOnly)
+    @Published var endpointComputeSelection = ProbeComputeSelection.selectedEndpointFromProcess(
+        default: ProbeSequenceLength.usesPal4Stack ? .all : .cpuOnly
+    )
     @Published var decoderComputeSelection = ProbeComputeSelection.selectedDecoderFromProcess(default: .all)
     @Published var layerSelection = ProbeLayerSelection.selectedFromProcess(default: .first48)
     @Published var cacheClearPolicy = ProbeCacheClearPolicy.selectedFromProcess(default: .runEndOnly)
@@ -1010,7 +1303,65 @@ final class ChatViewModel: ObservableObject {
     @Published var summary = "Idle"
     @Published var generatedTokenText = ""
     @Published var currentMemoryText = ProbeMemory.currentText()
+    @Published var photoItem: PhotosPickerItem?
+    @Published var attachedImage: UIImage?
+    @Published var imageNormSigned = false
+    @Published var apiAddress = ""
+    @Published var lastStatText = ""
+    @Published var streamTick = 0
     private var didAutoRun = false
+    private var controlServer: HTTPControlServer?
+    private var streamingMessageID: UUID?
+    private var streamingTokens: [Int] = []
+
+    /// Appends an empty assistant bubble that a streamed reply grows into.
+    private func beginStreamingAssistant() {
+        streamingTokens = []
+        let message = ChatMessage(role: .assistant, text: "", tokens: [], detail: nil, isError: false)
+        streamingMessageID = message.id
+        messages.append(message)
+    }
+
+    /// Grows the in-progress assistant bubble by one token so text appears
+    /// live. Invoked via `Task { @MainActor }` from the background generation
+    /// closure (see `onToken` in send), so it is already main-actor isolated.
+    func streamToken(_ tokenID: Int) {
+        guard let id = streamingMessageID,
+              let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        streamingTokens.append(tokenID)
+        messages[index].text = TokenDisplay.joinedLabels(for: streamingTokens)
+        messages[index].tokens = streamingTokens
+        streamTick &+= 1
+    }
+
+    private func finalizeStreaming(text: String, tokens: [Int], detail: String?, isError: Bool) {
+        if let id = streamingMessageID, let index = messages.firstIndex(where: { $0.id == id }) {
+            messages[index].text = text
+            messages[index].tokens = tokens
+            messages[index].detail = detail
+            messages[index].isError = isError
+        } else {
+            messages.append(ChatMessage(role: .assistant, text: text, tokens: tokens, detail: detail, isError: isError))
+        }
+        streamingMessageID = nil
+        streamTick &+= 1
+    }
+
+    func startControlServerIfNeeded() {
+        guard controlServer == nil else { return }
+        let server = HTTPControlServer(chatViewModel: self)
+        server.start()
+        controlServer = server
+        apiAddress = server.displayAddress
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification,
+            object: nil,
+            queue: .main
+        ) { _ in
+            // Do not hold the resident decoder set while backgrounded.
+            ProbeRunner.releaseResidentChatModels()
+        }
+    }
 
     var recentSteps: [ProbeStep] {
         Array(steps.suffix(16))
@@ -1023,9 +1374,9 @@ final class ChatViewModel: ObservableObject {
     }
 
     private static func selectedGeneratedTokenPresetFromProcess() -> Int {
-        let selected = ProbeRunner.selectedGeneratedTokenCountFromProcess(default: ProbeRunner.defaultChatGeneratedTokenCount)
+        let selected = ProbeRunner.selectedGeneratedTokenCountFromProcess(default: ProbeRunner.autoGeneratedTokenCount)
         guard generatedTokenPresets.contains(selected) else {
-            return ProbeRunner.defaultChatGeneratedTokenCount
+            return ProbeRunner.autoGeneratedTokenCount
         }
         return selected
     }
@@ -1062,6 +1413,10 @@ final class ChatViewModel: ObservableObject {
         }
         guard !text.isEmpty else {
             completion?(false, "empty message")
+            return
+        }
+        if let image = attachedImage {
+            sendWithImage(text: text, image: image, completion: completion)
             return
         }
 
@@ -1118,8 +1473,13 @@ final class ChatViewModel: ObservableObject {
             detail: resolvedWindow.detail,
             isError: false
         ))
+        ChatSessionLog.append(role: "user", text: text, tokens: [], seconds: nil, detail: nil)
+        beginStreamingAssistant()
 
         Task {
+            let onToken: (Int) -> Void = { [weak self] id in
+                Task { @MainActor in self?.streamToken(id) }
+            }
             let result = await Task.detached(priority: .userInitiated) {
                 ProbeRunner.run(
                     computePlan: computePlan,
@@ -1129,7 +1489,9 @@ final class ChatViewModel: ObservableObject {
                     sequenceLength: sequenceLength,
                     inputIDsText: inputIDsText,
                     generatedTokenCount: generatedTokenCount,
-                    retainedDecoderModelCount: retainedDecoderModelCount
+                    retainedDecoderModelCount: retainedDecoderModelCount,
+                    persistent: true,
+                    onToken: onToken
                 )
             }.value
 
@@ -1138,18 +1500,25 @@ final class ChatViewModel: ObservableObject {
             switch result {
             case .success(let report):
                 let tokens = Self.generatedTokenIDs(from: report)
-                let tokenText = tokens.map { "#\($0)" }.joined(separator: ", ")
                 let displayText = TokenDisplay.joinedLabels(for: tokens)
+                let finalText = displayText.isEmpty ? report.summary : displayText
                 steps = report.steps
                 summary = report.summary
-                generatedTokenText = tokenText
-                messages.append(ChatMessage(
-                    role: .assistant,
-                    text: displayText.isEmpty ? report.summary : displayText,
+                generatedTokenText = tokens.map { "#\($0)" }.joined(separator: ", ")
+                finalizeStreaming(
+                    text: finalText,
                     tokens: tokens,
                     detail: Self.generatedTokenDetail(from: report),
                     isError: false
-                ))
+                )
+                ChatSessionLog.append(
+                    role: "assistant",
+                    text: finalText,
+                    tokens: tokens,
+                    seconds: Self.generationSeconds(from: report),
+                    detail: Self.generatedTokenDetail(from: report)
+                )
+                lastStatText = Self.statText(tokens: tokens, report: report)
                 if let nextWindow = Self.slidTokenWindow(
                     from: inputIDsText,
                     appending: tokens,
@@ -1163,13 +1532,7 @@ final class ChatViewModel: ObservableObject {
                 steps = error.steps
                 summary = error.message
                 generatedTokenText = ""
-                messages.append(ChatMessage(
-                    role: .assistant,
-                    text: "Generation failed",
-                    tokens: [],
-                    detail: error.message,
-                    isError: true
-                ))
+                finalizeStreaming(text: "Generation failed", tokens: [], detail: error.message, isError: true)
                 success = false
                 completionSummary = error.message
             }
@@ -1178,6 +1541,219 @@ final class ChatViewModel: ObservableObject {
             isGenerating = false
             completion?(success, completionSummary)
         }
+    }
+
+    /// Image-attached turn: runs the real Gemma4 image embedder over 32
+    /// pixel patches and overlays the resulting hidden states into the
+    /// decoder window. The decoder stack itself is unchanged (same resident
+    /// pal4/ANE models), so per-token speed matches text-only chat.
+    private func sendWithImage(text: String, image: UIImage, completion: ((Bool, String) -> Void)?) {
+        guard let tokenizer = GemmaTokenizerStore.shared.tokenizer else {
+            completion?(false, "tokenizer unavailable")
+            return
+        }
+        let window: (ids: [Int32], imageStart: Int)
+        let pixelValues: MLMultiArray
+        do {
+            window = try tokenizer.encodeChatWindowWithImage(
+                prompt: text,
+                sequenceLength: sequenceLength,
+                imageTokenCount: ProbeRunner.imagePatchCount
+            )
+            pixelValues = try Self.makeImagePixelValues(from: image, signed: imageNormSigned)
+        } catch {
+            summary = error.localizedDescription
+            completion?(false, error.localizedDescription)
+            return
+        }
+
+        let inputIDsText = window.ids.map(String.init).joined(separator: ",")
+        let imageStart = window.imageStart
+        let generatedTokenCount = generatedTokenCount
+        let retainedDecoderModelCount = retainedDecoderModelCount
+        let computePlan = ProbeComputePlan(endpoint: endpointComputeSelection, decoder: decoderComputeSelection)
+        let layerSelection = layerSelection
+        let cacheClearPolicy = cacheClearPolicy
+        let sequenceLength = self.sequenceLength
+
+        messageText = ""
+        attachedImage = nil
+        photoItem = nil
+        isGenerating = true
+        summary = "Generating (image)"
+        generatedTokenText = ""
+        currentMemoryText = ProbeMemory.currentText()
+        messages.append(ChatMessage(
+            role: .user,
+            text: text,
+            tokens: [],
+            detail: "image: \(ProbeRunner.imagePatchCount) patches, window start \(imageStart)",
+            isError: false,
+            image: image
+        ))
+        ChatSessionLog.append(role: "user", text: text + " [image]", tokens: [], seconds: nil, detail: nil)
+        beginStreamingAssistant()
+
+        Task {
+            let onToken: (Int) -> Void = { [weak self] id in
+                Task { @MainActor in self?.streamToken(id) }
+            }
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<ProbeReport, ProbeFailure> in
+                do {
+                    let imageHidden = try ProbeRunner.encodeImage(pixelValues: pixelValues)
+                    return ProbeRunner.run(
+                        computePlan: computePlan,
+                        mode: .generateTokenLoop,
+                        layerSelection: layerSelection,
+                        cacheClearPolicy: cacheClearPolicy,
+                        sequenceLength: sequenceLength,
+                        inputIDsText: inputIDsText,
+                        generatedTokenCount: generatedTokenCount,
+                        retainedDecoderModelCount: retainedDecoderModelCount,
+                        imageHidden: imageHidden,
+                        imageStartPosition: imageStart,
+                        persistent: true,
+                        onToken: onToken
+                    )
+                } catch {
+                    return .failure(ProbeFailure(steps: [], message: String(describing: error)))
+                }
+            }.value
+
+            let success: Bool
+            let completionSummary: String
+            switch result {
+            case .success(let report):
+                let tokens = Self.generatedTokenIDs(from: report)
+                let displayText = TokenDisplay.joinedLabels(for: tokens)
+                let finalText = displayText.isEmpty ? report.summary : displayText
+                steps = report.steps
+                summary = report.summary
+                generatedTokenText = tokens.map { "#\($0)" }.joined(separator: ", ")
+                finalizeStreaming(
+                    text: finalText,
+                    tokens: tokens,
+                    detail: Self.generatedTokenDetail(from: report),
+                    isError: false
+                )
+                ChatSessionLog.append(
+                    role: "assistant",
+                    text: finalText,
+                    tokens: tokens,
+                    seconds: Self.generationSeconds(from: report),
+                    detail: Self.generatedTokenDetail(from: report)
+                )
+                lastStatText = Self.statText(tokens: tokens, report: report)
+                success = true
+                completionSummary = report.summary
+            case .failure(let error):
+                steps = error.steps
+                summary = error.message
+                finalizeStreaming(text: "Generation failed", tokens: [], detail: error.message, isError: true)
+                success = false
+                completionSummary = error.message
+            }
+
+            currentMemoryText = ProbeMemory.currentText()
+            isGenerating = false
+            completion?(success, completionSummary)
+        }
+    }
+
+    /// Human-readable "N tok · Ts · X tok/s" for the chat footer.
+    private static func statText(tokens: [Int], report: ProbeReport) -> String {
+        let totals = report.steps
+            .filter { $0.name.hasPrefix("Token ") && $0.name.hasSuffix(" total") }
+            .compactMap(\.seconds)
+        guard !totals.isEmpty, !tokens.isEmpty else { return "" }
+        // Warm rate = tokens after the first (the first can carry a resident
+        // model (re)load on a cold turn).
+        let warm = totals.count >= 2 ? Array(totals.dropFirst()) : totals
+        let warmSeconds = warm.reduce(0, +)
+        guard warmSeconds > 0 else { return "" }
+        let tps = Double(warm.count) / warmSeconds
+        return String(format: "%d tok · %.2f tok/s", tokens.count, tps)
+    }
+
+    /// Sum of per-token totals, for tok/s reporting in the session log.
+    private static func generationSeconds(from report: ProbeReport) -> Double? {
+        let seconds = report.steps
+            .filter { $0.name.hasPrefix("Token ") && $0.name.hasSuffix(" total") }
+            .compactMap(\.seconds)
+        return seconds.isEmpty ? nil : seconds.reduce(0, +)
+    }
+
+    /// Downscales the image to a 6x6 grid of 48x48 patches (288x288,
+    /// aspect-fill), normalizes RGB to [-1, 1] (Gemma processor convention:
+    /// rescale 1/255, mean 0.5, std 0.5), and packs the first 32 patches
+    /// row-major into the embedder contract [1, 32, 6912] fp32.
+    private static func makeImagePixelValues(from image: UIImage, signed: Bool) throws -> MLMultiArray {
+        let side = 288
+        let patchSide = 48
+        let gridColumns = 6
+        let patchCount = ProbeRunner.imagePatchCount
+        let patchDim = ProbeRunner.imagePatchDim
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side), format: format)
+        let squareImage = renderer.image { _ in
+            let imageSize = image.size
+            let scale = max(CGFloat(side) / imageSize.width, CGFloat(side) / imageSize.height)
+            let drawSize = CGSize(width: imageSize.width * scale, height: imageSize.height * scale)
+            let origin = CGPoint(
+                x: (CGFloat(side) - drawSize.width) / 2,
+                y: (CGFloat(side) - drawSize.height) / 2
+            )
+            image.draw(in: CGRect(origin: origin, size: drawSize))
+        }
+
+        guard let cgImage = squareImage.cgImage else {
+            throw ProbeError.unexpectedShape("could not rasterize attached image")
+        }
+        var rgba = [UInt8](repeating: 0, count: side * side * 4)
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        guard let context = CGContext(
+            data: &rgba,
+            width: side,
+            height: side,
+            bitsPerComponent: 8,
+            bytesPerRow: side * 4,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else {
+            throw ProbeError.unexpectedShape("could not create bitmap context")
+        }
+        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: side, height: side))
+
+        let array = try MLMultiArray(
+            shape: [1, NSNumber(value: patchCount), NSNumber(value: patchDim)],
+            dataType: .float32
+        )
+        let pointer = array.dataPointer.bindMemory(to: Float.self, capacity: array.count)
+        for patch in 0..<patchCount {
+            let patchX = patch % gridColumns
+            let patchY = patch / gridColumns
+            let base = patch * patchDim
+            for y in 0..<patchSide {
+                for x in 0..<patchSide {
+                    let pixelX = patchX * patchSide + x
+                    let pixelY = patchY * patchSide + y
+                    let sourceIndex = (pixelY * side + pixelX) * 4
+                    let destinationIndex = base + (y * patchSide + x) * 3
+                    if signed {
+                        pointer[destinationIndex] = Float(rgba[sourceIndex]) / 127.5 - 1.0
+                        pointer[destinationIndex + 1] = Float(rgba[sourceIndex + 1]) / 127.5 - 1.0
+                        pointer[destinationIndex + 2] = Float(rgba[sourceIndex + 2]) / 127.5 - 1.0
+                    } else {
+                        pointer[destinationIndex] = Float(rgba[sourceIndex]) / 255.0
+                        pointer[destinationIndex + 1] = Float(rgba[sourceIndex + 1]) / 255.0
+                        pointer[destinationIndex + 2] = Float(rgba[sourceIndex + 2]) / 255.0
+                    }
+                }
+            }
+        }
+        return array
     }
 
     private static func generatedTokenIDs(from report: ProbeReport) -> [Int] {
@@ -1459,6 +2035,9 @@ final class ProbeViewModel: ObservableObject {
             run(completion: completion)
         case .audioSmoke:
             runMode = .audioSmoke
+            run(completion: completion)
+        case .memoryRamp:
+            runMode = .memoryRamp
             run(completion: completion)
         case .chat:
             break

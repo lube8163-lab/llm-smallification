@@ -51,7 +51,7 @@ Use this prompt to continue in a fresh Codex chat.
 
 実機検証の現状:
 
-- Device: iPhone18,3 / iOS 26.4.2
+- Device: iPhone 17 (non-Pro, 256GB; device identifier `iPhone18,3`) / iOS 26.4.2
 - Best compute split so far: endpoint `CPU`, decoder `All`
 - Layers: First 48
 - Cache policy: Run end

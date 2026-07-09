@@ -1177,6 +1177,41 @@ final class GemmaBPETokenizer {
         return (ids, leftPad + header.count + 1)
     }
 
+    /// Chat window with a run of placeholder positions reserved for audio
+    /// hidden states, mirroring the image window. The real <eoa> (258883) has
+    /// a 3.6x-RMS embedding row with the same fp16-decoder overflow risk as
+    /// <eoi>, so the block closes with a newline instead.
+    func encodeChatWindowWithAudio(
+        prompt: String,
+        sequenceLength: ProbeSequenceLength,
+        audioTokenCount: Int
+    ) throws -> (ids: [Int32], audioStart: Int) {
+        let header: [Int32] = [2, 105, 2364, 107]
+        let tail: [Int32] = [106, 107, 105, 4368, 107, 100, 45518, 107, 101]
+        let beginAudio: Int32 = 256000        // <boa>
+        let audioPlaceholder: Int32 = 258881  // <audio>
+        let endAudio: Int32 = 107             // \n (avoid <eoa> 258883: fp16 overflow)
+        var promptIDs = try encodeText(prompt)
+        let budget = sequenceLength.rawValue - header.count - audioTokenCount - 2 - tail.count
+        guard budget >= 0 else {
+            throw ProbeError.invalidInputIDs(
+                "window \(sequenceLength.rawValue) too small for \(audioTokenCount) audio tokens plus chat template"
+            )
+        }
+        if promptIDs.count > budget {
+            promptIDs = Array(promptIDs.prefix(budget))
+        }
+        var ids = header
+        ids.append(beginAudio)
+        ids.append(contentsOf: [Int32](repeating: audioPlaceholder, count: audioTokenCount))
+        ids.append(endAudio)
+        ids.append(contentsOf: promptIDs)
+        ids.append(contentsOf: tail)
+        let leftPad = sequenceLength.rawValue - ids.count
+        ids = [Int32](repeating: padTokenID, count: leftPad) + ids
+        return (ids, leftPad + header.count + 1)
+    }
+
     func encodeChatWindow(prompt: String, sequenceLength: ProbeSequenceLength) throws -> [Int32] {
         let ids = try encodeChat(prompt: prompt)
         if ids.count < sequenceLength.rawValue {
@@ -1306,6 +1341,8 @@ final class ChatViewModel: ObservableObject {
     @Published var photoItem: PhotosPickerItem?
     @Published var attachedImage: UIImage?
     @Published var imageNormSigned = false
+    /// Raw waveform frames [1, 32, 640] staged by the HTTP API (audio_b64).
+    var attachedAudioFeatures: MLMultiArray?
     @Published var apiAddress = ""
     @Published var lastStatText = ""
     @Published var streamTick = 0
@@ -1417,6 +1454,10 @@ final class ChatViewModel: ObservableObject {
         }
         if let image = attachedImage {
             sendWithImage(text: text, image: image, completion: completion)
+            return
+        }
+        if let features = attachedAudioFeatures {
+            sendWithAudio(text: text, features: features, completion: completion)
             return
         }
 
@@ -1612,6 +1653,119 @@ final class ChatViewModel: ObservableObject {
                         retainedDecoderModelCount: retainedDecoderModelCount,
                         imageHidden: imageHidden,
                         imageStartPosition: imageStart,
+                        persistent: true,
+                        onToken: onToken
+                    )
+                } catch {
+                    return .failure(ProbeFailure(steps: [], message: String(describing: error)))
+                }
+            }.value
+
+            let success: Bool
+            let completionSummary: String
+            switch result {
+            case .success(let report):
+                let tokens = Self.generatedTokenIDs(from: report)
+                let displayText = TokenDisplay.joinedLabels(for: tokens)
+                let finalText = displayText.isEmpty ? report.summary : displayText
+                steps = report.steps
+                summary = report.summary
+                generatedTokenText = tokens.map { "#\($0)" }.joined(separator: ", ")
+                finalizeStreaming(
+                    text: finalText,
+                    tokens: tokens,
+                    detail: Self.generatedTokenDetail(from: report),
+                    isError: false
+                )
+                ChatSessionLog.append(
+                    role: "assistant",
+                    text: finalText,
+                    tokens: tokens,
+                    seconds: Self.generationSeconds(from: report),
+                    detail: Self.generatedTokenDetail(from: report)
+                )
+                lastStatText = Self.statText(tokens: tokens, report: report)
+                success = true
+                completionSummary = report.summary
+            case .failure(let error):
+                steps = error.steps
+                summary = error.message
+                finalizeStreaming(text: "Generation failed", tokens: [], detail: error.message, isError: true)
+                success = false
+                completionSummary = error.message
+            }
+
+            currentMemoryText = ProbeMemory.currentText()
+            isGenerating = false
+            completion?(success, completionSummary)
+        }
+    }
+
+    /// Audio counterpart of sendWithImage: caller supplies raw waveform
+    /// frames [1, 32, 640] (16 kHz PCM in [-1, 1]); the audio embedder output
+    /// overlays the <audio> placeholder block via the shared hidden-overlay
+    /// path in the token loop.
+    private func sendWithAudio(text: String, features: MLMultiArray, completion: ((Bool, String) -> Void)?) {
+        guard let tokenizer = GemmaTokenizerStore.shared.tokenizer else {
+            completion?(false, "tokenizer unavailable")
+            return
+        }
+        let window: (ids: [Int32], audioStart: Int)
+        do {
+            window = try tokenizer.encodeChatWindowWithAudio(
+                prompt: text,
+                sequenceLength: sequenceLength,
+                audioTokenCount: ProbeRunner.audioTokenCount
+            )
+        } catch {
+            summary = error.localizedDescription
+            completion?(false, error.localizedDescription)
+            return
+        }
+
+        let inputIDsText = window.ids.map(String.init).joined(separator: ",")
+        let audioStart = window.audioStart
+        let generatedTokenCount = generatedTokenCount
+        let retainedDecoderModelCount = retainedDecoderModelCount
+        let computePlan = ProbeComputePlan(endpoint: endpointComputeSelection, decoder: decoderComputeSelection)
+        let layerSelection = layerSelection
+        let cacheClearPolicy = cacheClearPolicy
+        let sequenceLength = self.sequenceLength
+
+        messageText = ""
+        attachedAudioFeatures = nil
+        isGenerating = true
+        summary = "Generating (audio)"
+        generatedTokenText = ""
+        currentMemoryText = ProbeMemory.currentText()
+        messages.append(ChatMessage(
+            role: .user,
+            text: text,
+            tokens: [],
+            detail: "audio: \(ProbeRunner.audioTokenCount) tokens (40ms each), window start \(audioStart)",
+            isError: false
+        ))
+        ChatSessionLog.append(role: "user", text: text + " [audio]", tokens: [], seconds: nil, detail: nil)
+        beginStreamingAssistant()
+
+        Task {
+            let onToken: (Int) -> Void = { [weak self] id in
+                Task { @MainActor in self?.streamToken(id) }
+            }
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<ProbeReport, ProbeFailure> in
+                do {
+                    let audioHidden = try ProbeRunner.encodeAudio(inputFeatures: features)
+                    return ProbeRunner.run(
+                        computePlan: computePlan,
+                        mode: .generateTokenLoop,
+                        layerSelection: layerSelection,
+                        cacheClearPolicy: cacheClearPolicy,
+                        sequenceLength: sequenceLength,
+                        inputIDsText: inputIDsText,
+                        generatedTokenCount: generatedTokenCount,
+                        retainedDecoderModelCount: retainedDecoderModelCount,
+                        imageHidden: audioHidden,
+                        imageStartPosition: audioStart,
                         persistent: true,
                         onToken: onToken
                     )

@@ -2525,8 +2525,30 @@ enum ProbeRunner {
             // though the spec declares fp16; normalize so the overlay (which
             // binds Float16) works either way.
             let imageHidden = try float16Copy(of: requireArray(named: "image_hidden", output: output))
-            logImageHiddenStats(imageHidden)
+            logHiddenStats(imageHidden, label: "Image")
             return imageHidden
+        }
+    }
+
+    /// Runs the bundled Gemma4 audio embedder over caller-supplied raw
+    /// waveform frames ([1, 32, 640] fp32, 16 kHz PCM in [-1, 1], 640 samples
+    /// = 40ms per token) and returns `audio_hidden` [1, 32, 3840] fp16 for
+    /// overlay into the decoder input, exactly like the image path.
+    static func encodeAudio(inputFeatures: MLMultiArray) throws -> MLMultiArray {
+        var steps: [ProbeStep] = []
+        return try autoreleasepool {
+            let audioEmbedder = try loadModel(named: audioEmbedderName, config: makeConfig(.cpuOnly), steps: &steps)
+            let output = try timedPrediction(
+                name: "Audio embedder (chat)",
+                model: audioEmbedder,
+                provider: MLDictionaryFeatureProvider(dictionary: [
+                    "input_features": MLFeatureValue(multiArray: inputFeatures)
+                ]),
+                steps: &steps
+            )
+            let audioHidden = try float16Copy(of: requireArray(named: "audio_hidden", output: output))
+            logHiddenStats(audioHidden, label: "Audio")
+            return audioHidden
         }
     }
 
@@ -2544,10 +2566,10 @@ enum ProbeRunner {
         return copy
     }
 
-    /// One-line scale diagnostic for the image path: exploded hiddens saturate
-    /// the softcapped lm_head (every top logit pinned at ~29.97), so the
-    /// magnitude here tells us whether pixel normalization matches training.
-    private static func logImageHiddenStats(_ array: MLMultiArray) {
+    /// One-line scale diagnostic for the modality paths: exploded hiddens
+    /// saturate the softcapped lm_head (every top logit pinned at ~29.97), so
+    /// the magnitude here tells us whether input normalization matches training.
+    private static func logHiddenStats(_ array: MLMultiArray, label: String) {
         guard array.dataType == .float16 else { return }
         let pointer = array.dataPointer.bindMemory(to: Float16.self, capacity: array.count)
         var maxAbs: Float = 0
@@ -2557,16 +2579,18 @@ enum ProbeRunner {
             maxAbs = max(maxAbs, abs(value))
             sum += value
         }
-        let line = "[CoreMLProbe] Image hidden stats maxAbs=\(maxAbs) mean=\(sum / Float(array.count)) count=\(array.count) scale=\(imageHiddenScale)"
+        let line = "[CoreMLProbe] \(label) hidden stats maxAbs=\(maxAbs) mean=\(sum / Float(array.count)) count=\(array.count) scale=\(imageHiddenScale)"
         print(line)
         appendToStepFile(line)
-        // encodeImage runs before run() calls resetStepFile(), so also stash the
-        // line and let run() re-append it after the reset.
+        // encodeImage/encodeAudio run before run() calls resetStepFile(), so
+        // also stash the line and let run() re-append it after the reset.
         pendingImageStatsLine = line
     }
 
     static let imagePatchCount = imageSmokePatchCount
     static let imagePatchDim = imageSmokePatchDim
+    static let audioTokenCount = audioSmokeTokenCount
+    static let audioFeatureDim = audioSmokeFeatureDim
 
     /// Multiplier applied to image_hidden vectors before they overlay the text
     /// embedding sequence. Defaults from `COREML_PROBE_IMAGE_SCALE` (else 1.0)

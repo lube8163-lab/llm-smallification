@@ -1,3 +1,4 @@
+import CoreML
 import Foundation
 import Network
 import UIKit
@@ -149,6 +150,16 @@ final class HTTPControlServer {
             image = decoded
         }
         let normSigned = (body["image_norm"] as? String) == "signed"
+        // Optional audio attachment: base64 WAV (16 kHz, mono, 16-bit PCM).
+        // The first 1.28s (32 frames x 640 samples) feeds the audio embedder.
+        var audioFeatures: MLMultiArray?
+        if let audioB64 = body["audio_b64"] as? String {
+            guard let data = Data(base64Encoded: audioB64), let features = Self.audioFrames(fromWAV: data) else {
+                send(connection: connection, status: "400 Bad Request", body: Data("audio_b64 must be a 16 kHz mono 16-bit PCM WAV\n".utf8), contentType: "text/plain")
+                return
+            }
+            audioFeatures = features
+        }
         // Optional image_hidden scale override (A/B the scale hypothesis without
         // reconverting the embedder). Persists on ProbeRunner for this request.
         if let imageScale = body["image_scale"] as? Double {
@@ -167,6 +178,9 @@ final class HTTPControlServer {
             if let image {
                 vm.attachedImage = image
                 vm.imageNormSigned = normSigned
+            }
+            if let audioFeatures {
+                vm.attachedAudioFeatures = audioFeatures
             }
             vm.messageText = prompt
             vm.send { success, summary in
@@ -204,6 +218,69 @@ final class HTTPControlServer {
         connection.send(content: payload, completion: .contentProcessed { _ in
             connection.cancel()
         })
+    }
+
+    /// Parses a 16 kHz mono 16-bit PCM WAV and packs the first 32 frames of
+    /// 640 samples (1.28s) into the audio embedder contract [1, 32, 640]
+    /// fp32 in [-1, 1], zero-padding shorter clips (zero = silence).
+    private static func audioFrames(fromWAV data: Data) -> MLMultiArray? {
+        guard data.count > 44,
+              String(data: data[data.startIndex..<data.index(data.startIndex, offsetBy: 4)], encoding: .ascii) == "RIFF",
+              String(data: data[data.index(data.startIndex, offsetBy: 8)..<data.index(data.startIndex, offsetBy: 12)], encoding: .ascii) == "WAVE" else {
+            return nil
+        }
+        func readUInt32(_ offset: Int) -> UInt32 {
+            data.subdata(in: data.index(data.startIndex, offsetBy: offset)..<data.index(data.startIndex, offsetBy: offset + 4))
+                .withUnsafeBytes { $0.loadUnaligned(as: UInt32.self) }
+        }
+        func readUInt16(_ offset: Int) -> UInt16 {
+            data.subdata(in: data.index(data.startIndex, offsetBy: offset)..<data.index(data.startIndex, offsetBy: offset + 2))
+                .withUnsafeBytes { $0.loadUnaligned(as: UInt16.self) }
+        }
+
+        var offset = 12
+        var sampleRate: UInt32 = 0
+        var channels: UInt16 = 0
+        var bitsPerSample: UInt16 = 0
+        var pcm: Data?
+        while offset + 8 <= data.count {
+            let chunkID = String(data: data[data.index(data.startIndex, offsetBy: offset)..<data.index(data.startIndex, offsetBy: offset + 4)], encoding: .ascii) ?? ""
+            let chunkSize = Int(readUInt32(offset + 4))
+            let bodyStart = offset + 8
+            guard bodyStart + chunkSize <= data.count else { break }
+            if chunkID == "fmt " {
+                channels = readUInt16(bodyStart + 2)
+                sampleRate = readUInt32(bodyStart + 4)
+                bitsPerSample = readUInt16(bodyStart + 14)
+            } else if chunkID == "data" {
+                pcm = data.subdata(in: data.index(data.startIndex, offsetBy: bodyStart)..<data.index(data.startIndex, offsetBy: bodyStart + chunkSize))
+            }
+            offset = bodyStart + chunkSize + (chunkSize % 2)
+        }
+        guard sampleRate == 16000, channels == 1, bitsPerSample == 16, let pcm else {
+            print("[CoreMLProbe] audio_b64 rejected: rate=\(sampleRate) ch=\(channels) bits=\(bitsPerSample) data=\(pcm?.count ?? 0)")
+            return nil
+        }
+
+        let tokenCount = ProbeRunner.audioTokenCount
+        let featureDim = ProbeRunner.audioFeatureDim
+        guard let array = try? MLMultiArray(
+            shape: [1, NSNumber(value: tokenCount), NSNumber(value: featureDim)],
+            dataType: .float32
+        ) else { return nil }
+        let pointer = array.dataPointer.bindMemory(to: Float.self, capacity: array.count)
+        let sampleCount = pcm.count / 2
+        pcm.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            for index in 0..<(tokenCount * featureDim) {
+                if index < sampleCount {
+                    pointer[index] = Float(raw.loadUnaligned(fromByteOffset: index * 2, as: Int16.self)) / 32768.0
+                } else {
+                    pointer[index] = 0
+                }
+            }
+        }
+        print("[CoreMLProbe] audio_b64 accepted: \(sampleCount) samples (\(String(format: "%.2f", Double(sampleCount) / 16000.0))s), using \(tokenCount * featureDim)")
+        return array
     }
 
     private static func wifiIPv4Address() -> String? {

@@ -19,6 +19,10 @@ from coremltools.converters.mil.mil import types
 SRC = "runpod-artifacts/coreml-multimodal/gemma4_12b_image_embedder_patches32_int4_block32.mlpackage"
 OUT_FP32 = sys.argv[1]
 OUT_INT4 = sys.argv[2]
+# Patch count of the rebuilt package. The graph and weights are patch-count
+# agnostic (positions gather from a 1120-row table), so the same source
+# package can emit e.g. a 256-patch (16x16 grid = 768x768 pixels) variant.
+PATCHES = int(sys.argv[3]) if len(sys.argv) > 3 else 32
 
 print("loading + decompressing", SRC, flush=True)
 m = ct.models.MLModel(SRC, compute_units=ct.ComputeUnit.CPU_ONLY)
@@ -78,7 +82,7 @@ for op in f.operations:
 assert rms_eps is not None
 print("rms_eps", rms_eps, flush=True)
 
-P, D, H = 32, 6912, 3840
+P, D, H = PATCHES, 6912, 3840
 
 @mb.program(
     input_specs=[
@@ -132,7 +136,7 @@ print("saved", OUT_FP32, flush=True)
 
 # ---- validation helpers ----
 def grid_pos():
-    side = 6
+    side = int(np.ceil(np.sqrt(P)))
     pos = np.zeros((1, P, 2), dtype=np.int32)
     for p in range(P):
         pos[0, p, 0] = p % side

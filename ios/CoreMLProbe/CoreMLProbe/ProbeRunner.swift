@@ -99,6 +99,7 @@ enum ProbeSequenceLength: Int, CaseIterable, Identifiable {
     case seq20 = 20
     case seq32 = 32
     case seq64 = 64
+    case seq320 = 320
 
     var id: Int { rawValue }
 
@@ -198,6 +199,12 @@ enum ProbeSequenceLength: Int, CaseIterable, Identifiable {
                 3335, 236924, 94951, 237007, 239309, 241910, 18794, 36976,
                 11914, 236924, 106, 107, 105, 4368, 107, 100, 45518, 107, 101
             ]
+        case .seq320:
+            [Int32](repeating: 0, count: 320 - 29) + [
+                2, 105, 2364, 107, 85141, 236924, 238906, 237234, 7604, 31600,
+                3335, 236924, 94951, 237007, 239309, 241910, 18794, 36976,
+                11914, 236924, 106, 107, 105, 4368, 107, 100, 45518, 107, 101
+            ]
         }
     }
 
@@ -243,7 +250,7 @@ enum ProbeSequenceLength: Int, CaseIterable, Identifiable {
         }
     }
 
-    private static func modelExists(named name: String) -> Bool {
+    fileprivate static func modelExists(named name: String) -> Bool {
         Bundle.main.url(forResource: name, withExtension: "mlmodelc", subdirectory: "Models") != nil
     }
 }
@@ -637,6 +644,7 @@ enum ProbeRunner {
         return names
     }()
     private static let imageEmbedderName = "gemma4_12b_image_embedder_patches32_int4_block32"
+    private static let imageEmbedder256Name = "gemma4_12b_image_embedder_patches256_int4_block32"
     private static let imageSmokePatchCount = 32
     private static let imageSmokePatchDim = 48 * 48 * 3
     private static let audioEmbedderName = "gemma4_12b_audio_embedder_tokens32_int4_block32"
@@ -769,6 +777,7 @@ enum ProbeRunner {
         retainedDecoderModelCount: Int? = nil,
         imageHidden: MLMultiArray? = nil,
         imageStartPosition: Int = -1,
+        imageBlockBidirectional: Bool = false,
         persistent: Bool = false,
         onToken: ((Int) -> Void)? = nil
     ) -> Result<ProbeReport, ProbeFailure> {
@@ -947,6 +956,7 @@ enum ProbeRunner {
                     retainedDecoderModelCount: retainedDecoderModelCount,
                     imageHidden: imageHidden,
                     imageStartPosition: imageStartPosition,
+                    imageBlockBidirectional: imageBlockBidirectional,
                     persistent: persistent,
                     onToken: onToken,
                     steps: &steps
@@ -1306,6 +1316,7 @@ enum ProbeRunner {
         retainedDecoderModelCount: Int?,
         imageHidden: MLMultiArray? = nil,
         imageStartPosition: Int = -1,
+        imageBlockBidirectional: Bool = false,
         persistent: Bool = false,
         onToken: ((Int) -> Void)? = nil,
         steps: inout [ProbeStep]
@@ -1348,6 +1359,7 @@ enum ProbeRunner {
                 tokenCount: tokenCount,
                 imageHidden: imageHidden,
                 imageStartPosition: imageStartPosition,
+                imageBlockBidirectional: imageBlockBidirectional,
                 sequenceLength: sequenceLength,
                 decoderConfig: decoderConfig,
                 layerSelection: layerSelection,
@@ -1380,6 +1392,7 @@ enum ProbeRunner {
                 tokenCount: tokenCount,
                 imageHidden: imageHidden,
                 imageStartPosition: imageStartPosition,
+                imageBlockBidirectional: imageBlockBidirectional,
                 sequenceLength: sequenceLength,
                 decoderConfig: decoderConfig,
                 layerSelection: layerSelection,
@@ -1415,6 +1428,7 @@ enum ProbeRunner {
         tokenCount: Int,
         imageHidden: MLMultiArray?,
         imageStartPosition: Int,
+        imageBlockBidirectional: Bool = false,
         sequenceLength: ProbeSequenceLength,
         decoderConfig: MLModelConfiguration,
         layerSelection: ProbeLayerSelection,
@@ -1473,6 +1487,9 @@ enum ProbeRunner {
                     cacheClearPolicy: cacheClearPolicy,
                     providedPlan: decoderPlan,
                     retainedDecoders: models.retained.models,
+                    bidirectionalBlock: (imageBlockBidirectional && imageHidden != nil)
+                        ? imageWindowStart..<(imageWindowStart + imageHidden!.count / 3840)
+                        : nil,
                     steps: &steps
                 )
                 let lastHidden = try copyLastToken(from: decoded, sequenceLength: sequenceLength)
@@ -1939,6 +1956,7 @@ enum ProbeRunner {
         cacheClearPolicy: ProbeCacheClearPolicy,
         providedPlan: DecoderLayerPlan? = nil,
         retainedDecoders: [String: MLModel] = [:],
+        bidirectionalBlock: Range<Int>? = nil,
         steps: inout [ProbeStep]
     ) throws -> MLMultiArray {
         let plan: DecoderLayerPlan
@@ -1965,6 +1983,7 @@ enum ProbeRunner {
                     layerName: layer.name
                 ),
                 retainedModel: retainedDecoders[layer.name],
+                bidirectionalBlock: bidirectionalBlock,
                 steps: &steps
             )
         }
@@ -1980,6 +1999,7 @@ enum ProbeRunner {
         leftPadCount: Int,
         cacheClearReason: String?,
         retainedModel: MLModel? = nil,
+        bidirectionalBlock: Range<Int>? = nil,
         steps: inout [ProbeStep]
     ) throws -> MLMultiArray {
         let usesRetainedModel = retainedModel != nil
@@ -1991,7 +2011,7 @@ enum ProbeRunner {
                 decoder = try loadModel(named: layer.name, config: decoderLoadConfig(for: layer, base: config), steps: &steps)
             }
             let positionIDs = try makePositionIDs(seqLength: sequenceLength.rawValue, start: positionStart, leftPadCount: leftPadCount)
-            let mask = try makeCausalMask(seqLength: sequenceLength.rawValue, leftPadCount: leftPadCount)
+            let mask = try makeCausalMask(seqLength: sequenceLength.rawValue, leftPadCount: leftPadCount, bidirectionalBlock: bidirectionalBlock)
             let output = try timedPrediction(
                 name: "Decoder layer \(layer.title)",
                 model: decoder,
@@ -2445,14 +2465,14 @@ enum ProbeRunner {
         return array
     }
 
-    private static func makeImageSmokePositionIDs() throws -> MLMultiArray {
+    private static func makeImageSmokePositionIDs(patchCount: Int = imageSmokePatchCount) throws -> MLMultiArray {
         let array = try MLMultiArray(
-            shape: [1, NSNumber(value: imageSmokePatchCount), 2],
+            shape: [1, NSNumber(value: patchCount), 2],
             dataType: .int32
         )
         let pointer = array.dataPointer.bindMemory(to: Int32.self, capacity: array.count)
-        let side = Int32(ceil(sqrt(Double(imageSmokePatchCount))))
-        for patchIndex in 0..<imageSmokePatchCount {
+        let side = Int32(ceil(sqrt(Double(patchCount))))
+        for patchIndex in 0..<patchCount {
             let base = patchIndex * 2
             pointer[base] = Int32(patchIndex) % side
             pointer[base + 1] = Int32(patchIndex) / side
@@ -2509,9 +2529,11 @@ enum ProbeRunner {
     /// Loads the embedder on CPU (it is small: ~39MB, predict ~0.02s).
     static func encodeImage(pixelValues: MLMultiArray) throws -> MLMultiArray {
         var steps: [ProbeStep] = []
-        let positionIDs = try makeImageSmokePositionIDs()
+        let patchCount = pixelValues.shape.count > 1 ? pixelValues.shape[1].intValue : imageSmokePatchCount
+        let embedderName = patchCount == 256 ? imageEmbedder256Name : imageEmbedderName
+        let positionIDs = try makeImageSmokePositionIDs(patchCount: patchCount)
         return try autoreleasepool {
-            let imageEmbedder = try loadModel(named: imageEmbedderName, config: makeConfig(.cpuOnly), steps: &steps)
+            let imageEmbedder = try loadModel(named: embedderName, config: makeConfig(.cpuOnly), steps: &steps)
             let output = try timedPrediction(
                 name: "Image embedder (chat)",
                 model: imageEmbedder,
@@ -2591,6 +2613,17 @@ enum ProbeRunner {
     static let imagePatchDim = imageSmokePatchDim
     static let audioTokenCount = audioSmokeTokenCount
     static let audioFeatureDim = audioSmokeFeatureDim
+
+    /// True when the full-fidelity image chat stack is bundled: Seq320 text
+    /// embedding, at least the first Seq320 decoder layer, and the 256-patch
+    /// (16x16 grid = 768x768 px) image embedder. 256 image tokens matches the
+    /// real Gemma 4 processor budget; the Seq64/32-patch path stays as the
+    /// fallback micro smoke.
+    static var imageChatSeq320Available: Bool {
+        ProbeSequenceLength.modelExists(named: "gemma4_12b_embedding_seq320_int4_block32")
+            && ProbeSequenceLength.modelExists(named: ProbeSequenceLength.seq320.decoderName)
+            && ProbeSequenceLength.modelExists(named: imageEmbedder256Name)
+    }
 
     /// Multiplier applied to image_hidden vectors before they overlay the text
     /// embedding sequence. Defaults from `COREML_PROBE_IMAGE_SCALE` (else 1.0)
@@ -2845,7 +2878,11 @@ enum ProbeRunner {
         return array
     }
 
-    private static func makeCausalMask(seqLength: Int, leftPadCount: Int = 0) throws -> MLMultiArray {
+    private static func makeCausalMask(
+        seqLength: Int,
+        leftPadCount: Int = 0,
+        bidirectionalBlock: Range<Int>? = nil
+    ) throws -> MLMultiArray {
         let array = try MLMultiArray(
             shape: [1, 1, NSNumber(value: seqLength), NSNumber(value: seqLength)],
             dataType: .float16
@@ -2858,6 +2895,19 @@ enum ProbeRunner {
             for column in 0..<seqLength where column > row {
                 pointer[row * seqLength + column] = Float16(-65504.0)
             }
+        }
+        // Gemma 4 trains image soft tokens with bidirectional attention inside
+        // the block (get_block_sequence_ids_for_mask), so unmask block-internal
+        // positions before re-applying pad masking.
+        if let block = bidirectionalBlock {
+            let clamped = max(0, block.lowerBound)..<min(seqLength, block.upperBound)
+            for row in clamped {
+                for column in clamped {
+                    pointer[row * seqLength + column] = 0
+                }
+            }
+        }
+        for row in 0..<seqLength {
             for column in 0..<min(leftPadCount, seqLength) {
                 pointer[row * seqLength + column] = Float16(-65504.0)
             }

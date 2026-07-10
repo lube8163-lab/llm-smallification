@@ -1593,15 +1593,22 @@ final class ChatViewModel: ObservableObject {
             completion?(false, "tokenizer unavailable")
             return
         }
+        // Prefer the full-fidelity path (Seq320 window, 256 image tokens =
+        // the real processor budget) whenever its assets are bundled; fall
+        // back to the Seq64/32-patch micro smoke otherwise.
+        let useSeq320 = ProbeRunner.imageChatSeq320Available
+        let imageSequenceLength: ProbeSequenceLength = useSeq320 ? .seq320 : sequenceLength
+        let imagePatchCount = useSeq320 ? 256 : ProbeRunner.imagePatchCount
+
         let window: (ids: [Int32], imageStart: Int)
         let pixelValues: MLMultiArray
         do {
             window = try tokenizer.encodeChatWindowWithImage(
                 prompt: text,
-                sequenceLength: sequenceLength,
-                imageTokenCount: ProbeRunner.imagePatchCount
+                sequenceLength: imageSequenceLength,
+                imageTokenCount: imagePatchCount
             )
-            pixelValues = try Self.makeImagePixelValues(from: image, signed: imageNormSigned)
+            pixelValues = try Self.makeImagePixelValues(from: image, signed: imageNormSigned, patchCount: imagePatchCount)
         } catch {
             summary = error.localizedDescription
             completion?(false, error.localizedDescription)
@@ -1615,7 +1622,7 @@ final class ChatViewModel: ObservableObject {
         let computePlan = ProbeComputePlan(endpoint: endpointComputeSelection, decoder: decoderComputeSelection)
         let layerSelection = layerSelection
         let cacheClearPolicy = cacheClearPolicy
-        let sequenceLength = self.sequenceLength
+        let sequenceLength = imageSequenceLength
 
         messageText = ""
         attachedImage = nil
@@ -1628,7 +1635,7 @@ final class ChatViewModel: ObservableObject {
             role: .user,
             text: text,
             tokens: [],
-            detail: "image: \(ProbeRunner.imagePatchCount) patches, window start \(imageStart)",
+            detail: "image: \(imagePatchCount) patches, seq \(imageSequenceLength.rawValue), window start \(imageStart)",
             isError: false,
             image: image
         ))
@@ -1653,6 +1660,7 @@ final class ChatViewModel: ObservableObject {
                         retainedDecoderModelCount: retainedDecoderModelCount,
                         imageHidden: imageHidden,
                         imageStartPosition: imageStart,
+                        imageBlockBidirectional: true,
                         persistent: true,
                         onToken: onToken
                     )
@@ -1837,15 +1845,17 @@ final class ChatViewModel: ObservableObject {
         return seconds.isEmpty ? nil : seconds.reduce(0, +)
     }
 
-    /// Downscales the image to a 6x6 grid of 48x48 patches (288x288,
-    /// aspect-fill), normalizes RGB to [-1, 1] (Gemma processor convention:
-    /// rescale 1/255, mean 0.5, std 0.5), and packs the first 32 patches
-    /// row-major into the embedder contract [1, 32, 6912] fp32.
-    private static func makeImagePixelValues(from image: UIImage, signed: Bool) throws -> MLMultiArray {
-        let side = 288
+    /// Downscales the image to a square grid of 48x48 patches (aspect-fill)
+    /// and packs them row-major into the embedder contract [1, N, 6912] fp32.
+    /// patchCount 256 = the real processor budget (16x16 grid, 768x768 px;
+    /// merged-patch layout is plain row-major 48x48x3, verified against
+    /// patches_merge). patchCount 32 = the legacy micro smoke (6x6 grid,
+    /// first 32 patches). The real processor only rescales 1/255 to [0, 1],
+    /// so signed=false matches training; signed=true stays as an A/B knob.
+    private static func makeImagePixelValues(from image: UIImage, signed: Bool, patchCount: Int = ProbeRunner.imagePatchCount) throws -> MLMultiArray {
         let patchSide = 48
-        let gridColumns = 6
-        let patchCount = ProbeRunner.imagePatchCount
+        let gridColumns = patchCount == 256 ? 16 : 6
+        let side = gridColumns * patchSide
         let patchDim = ProbeRunner.imagePatchDim
 
         let format = UIGraphicsImageRendererFormat()

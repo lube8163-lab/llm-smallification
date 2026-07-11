@@ -1461,12 +1461,18 @@ final class ChatViewModel: ObservableObject {
             return
         }
 
+        // With the KV assets bundled, route plain text chat through the Seq320
+        // window too: one 320-token prefill then seq-1 decode steps, which
+        // reads longer replies than the fixed sliding window and shares the
+        // image path's fast decode.
+        let effectiveSequenceLength: ProbeSequenceLength =
+            ProbeRunner.kvChatAvailable ? .seq320 : self.sequenceLength
         let resolvedWindow: TokenWindowResolution
         do {
             resolvedWindow = try Self.resolveTokenWindow(
                 messageText: text,
                 fallbackText: inputIDsText,
-                sequenceLength: sequenceLength
+                sequenceLength: effectiveSequenceLength
             )
         } catch {
             messageText = ""
@@ -1497,7 +1503,7 @@ final class ChatViewModel: ObservableObject {
         let computePlan = ProbeComputePlan(endpoint: endpointComputeSelection, decoder: decoderComputeSelection)
         let layerSelection = layerSelection
         let cacheClearPolicy = cacheClearPolicy
-        let sequenceLength = self.sequenceLength
+        let sequenceLength = effectiveSequenceLength
 
         if resolvedWindow.shouldUpdateInputField {
             self.inputIDsText = inputIDsText

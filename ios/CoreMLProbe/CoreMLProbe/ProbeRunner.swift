@@ -795,7 +795,12 @@ enum ProbeRunner {
             recordStep("Start", detail: "\(computePlan.logDetail), \(mode.title), \(sequenceLength.title), \(layerSelection.title), cache=\(cacheClearPolicy.title)", steps: &steps)
             clearCoreMLRuntimeCache(reason: "run start", steps: &steps)
             try validateComputePlan(computePlan, mode: mode)
-            try validateDecoderBundlePlan(mode: mode, layerSelection: layerSelection, sequenceLength: sequenceLength)
+            // The KV path uses its own prefill/decode bundles, not the
+            // per-layer seq320 decoder singles the standard plan validates.
+            let usesKVPath = mode == .generateTokenLoop && sequenceLength == .seq320 && kvChatAvailable
+            if !usesKVPath {
+                try validateDecoderBundlePlan(mode: mode, layerSelection: layerSelection, sequenceLength: sequenceLength)
+            }
 
             let endpointConfig = makeConfig(computePlan.endpoint)
             let decoderConfig = makeConfig(computePlan.decoder)
@@ -945,22 +950,45 @@ enum ProbeRunner {
                 )
                 summary = "OK: next token #\(token.index) \(String(format: "%.3f", token.logit))"
             case .generateTokenLoop:
-                let predictions = try runGenerateTokenLoop(
-                    endpointConfig: endpointConfig,
-                    decoderConfig: decoderConfig,
-                    layerSelection: layerSelection,
-                    cacheClearPolicy: cacheClearPolicy,
-                    sequenceLength: sequenceLength,
-                    inputIDsText: inputIDsText,
-                    generatedTokenCount: generatedTokenCount,
-                    retainedDecoderModelCount: retainedDecoderModelCount,
-                    imageHidden: imageHidden,
-                    imageStartPosition: imageStartPosition,
-                    imageBlockBidirectional: imageBlockBidirectional,
-                    persistent: persistent,
-                    onToken: onToken,
-                    steps: &steps
-                )
+                // Prefer the KV-cache path when its 320-prefill / 512-capacity
+                // assets are bundled and the run uses the Seq320 window (image
+                // chat, or text explicitly routed to Seq320). It shares one
+                // chunked prefill and then runs seq-1 decode steps against the
+                // caches, unlocking longer replies than the fixed window.
+                let predictions: [TokenPrediction]
+                if sequenceLength == .seq320 && kvChatAvailable {
+                    predictions = try runKVGeneration(
+                        endpointConfig: endpointConfig,
+                        decoderConfig: decoderConfig,
+                        layerSelection: layerSelection,
+                        inputIDsText: inputIDsText,
+                        generatedTokenCount: generatedTokenCount,
+                        retainedDecoderModelCount: retainedDecoderModelCount,
+                        imageHidden: imageHidden,
+                        imageStartPosition: imageStartPosition,
+                        imageBlockBidirectional: imageBlockBidirectional,
+                        persistent: persistent,
+                        onToken: onToken,
+                        steps: &steps
+                    )
+                } else {
+                    predictions = try runGenerateTokenLoop(
+                        endpointConfig: endpointConfig,
+                        decoderConfig: decoderConfig,
+                        layerSelection: layerSelection,
+                        cacheClearPolicy: cacheClearPolicy,
+                        sequenceLength: sequenceLength,
+                        inputIDsText: inputIDsText,
+                        generatedTokenCount: generatedTokenCount,
+                        retainedDecoderModelCount: retainedDecoderModelCount,
+                        imageHidden: imageHidden,
+                        imageStartPosition: imageStartPosition,
+                        imageBlockBidirectional: imageBlockBidirectional,
+                        persistent: persistent,
+                        onToken: onToken,
+                        steps: &steps
+                    )
+                }
                 let tokens = predictions.map { "#\($0.index)" }.joined(separator: ",")
                 summary = "OK: generated \(predictions.count) tokens \(tokens)"
             case .multimodalSmoke:
@@ -2175,6 +2203,315 @@ enum ProbeRunner {
         )
     }
 
+    // MARK: - KV-cache generation
+
+    /// Fixed KV geometry matching the converted assets. Prompt prefill fills
+    /// slots [0, 320); generation writes slots [320, 512) — up to 192 tokens.
+    static let kvPrefillLength = 320
+    static let kvCacheCapacity = 512
+
+    private static func kvPrefillName(layer: Int) -> String {
+        String(format: "gemma4_12b_layer%02d_prefill_seq%d_kv_pal4_g16", layer, kvPrefillLength)
+    }
+
+    private static func kvDecodeName(layer: Int) -> String {
+        String(format: "gemma4_12b_layer%02d_decode_kv%d_pal4_g16", layer, kvCacheCapacity)
+    }
+
+    private static let kvEmbeddingSeq1Name = "gemma4_12b_embedding_seq1_int4_block32"
+
+    /// True when the whole KV stack is bundled (checked at the endpoints and
+    /// both layer families' first/last members). `COREML_PROBE_DISABLE_KV=1`
+    /// keeps the cache-free path selectable for A/B runs.
+    static var kvChatAvailable: Bool {
+        if ProcessInfo.processInfo.environment["COREML_PROBE_DISABLE_KV"] == "1" { return false }
+        return ProbeSequenceLength.modelExists(named: kvEmbeddingSeq1Name)
+            && ProbeSequenceLength.modelExists(named: ProbeSequenceLength.seq320.embeddingName)
+            && ProbeSequenceLength.modelExists(named: kvPrefillName(layer: 0))
+            && ProbeSequenceLength.modelExists(named: kvPrefillName(layer: 47))
+            && ProbeSequenceLength.modelExists(named: kvDecodeName(layer: 0))
+            && ProbeSequenceLength.modelExists(named: kvDecodeName(layer: 47))
+    }
+
+    /// Per-layer KV cache geometry. Gemma 4 Unified alternates 5 sliding
+    /// (GQA, 8 heads x 256) + 1 full-attention (MQA with K=V projection,
+    /// 1 head x 512) layers; mirrors the conversion-side `layer_kv_shape`.
+    private static func kvLayerGeometry(layer: Int) -> (heads: Int, headDim: Int) {
+        layer % 6 == 5 ? (1, 512) : (8, 256)
+    }
+
+    private struct KVLayerCache {
+        let kBuffer: MLMultiArray
+        let vBuffer: MLMultiArray
+        let heads: Int
+        let headDim: Int
+    }
+
+    private static func makeKVCaches(layerCount: Int) throws -> [KVLayerCache] {
+        try (0..<layerCount).map { layer in
+            let geometry = kvLayerGeometry(layer: layer)
+            let shape: [NSNumber] = [1, NSNumber(value: geometry.heads), NSNumber(value: kvCacheCapacity), NSNumber(value: geometry.headDim)]
+            let k = try MLMultiArray(shape: shape, dataType: .float16)
+            let v = try MLMultiArray(shape: shape, dataType: .float16)
+            // Zero-fill so unwritten slots hold defined values (they are also
+            // masked with -inf, but NaN garbage would still poison 0*NaN paths).
+            for buffer in [k, v] {
+                let pointer = buffer.dataPointer.bindMemory(to: Float16.self, capacity: buffer.count)
+                for index in 0..<buffer.count { pointer[index] = 0 }
+            }
+            return KVLayerCache(kBuffer: k, vBuffer: v, heads: geometry.heads, headDim: geometry.headDim)
+        }
+    }
+
+    /// Copies a prefill K/V block [1,H,block,D] into cache slots [0, block).
+    private static func copyKVBlock(_ block: MLMultiArray, into buffer: MLMultiArray, cache: KVLayerCache) throws {
+        guard block.dataType == .float16, buffer.dataType == .float16 else {
+            throw ProbeError.unexpectedShape("KV block dtype \(block.dataType)")
+        }
+        let blockLength = block.count / (cache.heads * cache.headDim)
+        let source = block.dataPointer.bindMemory(to: Float16.self, capacity: block.count)
+        let destination = buffer.dataPointer.bindMemory(to: Float16.self, capacity: buffer.count)
+        for head in 0..<cache.heads {
+            let sourceBase = head * blockLength * cache.headDim
+            let destinationBase = head * kvCacheCapacity * cache.headDim
+            for index in 0..<(blockLength * cache.headDim) {
+                destination[destinationBase + index] = source[sourceBase + index]
+            }
+        }
+    }
+
+    /// Writes a decode-step K/V [1,H,1,D] into cache slot `slot`.
+    private static func writeKVSlot(_ new: MLMultiArray, into buffer: MLMultiArray, cache: KVLayerCache, slot: Int) {
+        let source = new.dataPointer.bindMemory(to: Float16.self, capacity: new.count)
+        let destination = buffer.dataPointer.bindMemory(to: Float16.self, capacity: buffer.count)
+        for head in 0..<cache.heads {
+            let sourceBase = head * cache.headDim
+            let destinationBase = (head * kvCacheCapacity + slot) * cache.headDim
+            for index in 0..<cache.headDim {
+                destination[destinationBase + index] = source[sourceBase + index]
+            }
+        }
+    }
+
+    /// Decode-step mask [1,1,1,capacity+1]: slots [leftPad, written) and the
+    /// new token itself (last column) are visible; pads and unwritten slots
+    /// stay at -inf.
+    private static func makeKVDecodeMask(leftPadCount: Int, written: Int) throws -> MLMultiArray {
+        let width = kvCacheCapacity + 1
+        let mask = try MLMultiArray(shape: [1, 1, 1, NSNumber(value: width)], dataType: .float16)
+        let pointer = mask.dataPointer.bindMemory(to: Float16.self, capacity: width)
+        for index in 0..<width { pointer[index] = Float16(-65504.0) }
+        for index in leftPadCount..<min(written, kvCacheCapacity) { pointer[index] = 0 }
+        pointer[width - 1] = 0
+        return mask
+    }
+
+    private struct KVChatModels {
+        let embeddingSeq1: MLModel
+        let lmHead: LoadedProbeModel
+        let decoders: [String: MLModel]
+    }
+
+    private static var residentKVModels: KVChatModels?
+    private static var residentKVSignature: String?
+
+    static func releaseResidentKVModels() {
+        residentKVModels = nil
+        residentKVSignature = nil
+    }
+
+    private static func ensureResidentKVModels(
+        layerCount: Int,
+        retainCount: Int,
+        endpointConfig: MLModelConfiguration,
+        decoderConfig: MLModelConfiguration,
+        steps: inout [ProbeStep]
+    ) throws -> KVChatModels {
+        let signature = "kv|\(layerCount)|retain\(retainCount)|ep\(endpointConfig.computeUnits.rawValue)|dec\(decoderConfig.computeUnits.rawValue)"
+        if let models = residentKVModels, residentKVSignature == signature {
+            recordStep("Resident KV models", detail: "reused signature=\(signature)", steps: &steps)
+            return models
+        }
+        releaseResidentKVModels()
+        releaseResidentChatModels()
+        recordStep("Resident KV models", detail: "loading signature=\(signature)", steps: &steps)
+        var decoders: [String: MLModel] = [:]
+        for layer in 0..<min(retainCount, layerCount) {
+            let name = kvDecodeName(layer: layer)
+            decoders[name] = try loadModel(named: name, config: decoderConfig, steps: &steps)
+        }
+        let models = KVChatModels(
+            embeddingSeq1: try loadModel(named: kvEmbeddingSeq1Name, config: makeEmbeddingConfig(), steps: &steps),
+            lmHead: try loadLMHead(config: endpointConfig, steps: &steps),
+            decoders: decoders
+        )
+        residentKVModels = models
+        residentKVSignature = signature
+        return models
+    }
+
+    /// KV-cache generation: one chunked prefill over the 320-token window
+    /// fills the caches and produces token 1; each further token runs the
+    /// seq-1 decode stack against the caches (attention over [cache ; new]).
+    private static func runKVGeneration(
+        endpointConfig: MLModelConfiguration,
+        decoderConfig: MLModelConfiguration,
+        layerSelection: ProbeLayerSelection,
+        inputIDsText: String?,
+        generatedTokenCount: Int?,
+        retainedDecoderModelCount: Int?,
+        imageHidden: MLMultiArray?,
+        imageStartPosition: Int,
+        imageBlockBidirectional: Bool,
+        persistent: Bool,
+        onToken: ((Int) -> Void)?,
+        steps: inout [ProbeStep]
+    ) throws -> [TokenPrediction] {
+        let sequenceLength = ProbeSequenceLength.seq320
+        let inputWindow = try selectedInputWindow(overrideText: inputIDsText, sequenceLength: sequenceLength)
+        // The cache holds capacity-prefill generation slots; clamp rather than
+        // fail so the 256-token chat preset still runs (just capped).
+        let tokenCount = min(try selectedGeneratedTokenCount(override: generatedTokenCount), kvCacheCapacity - kvPrefillLength)
+        let layerCount = min(layerSelection.requestedCount ?? 48, 48)
+        let retainCount = retainedDecoderModelCount ?? 0
+        recordStep(
+            "KV generation",
+            detail: "prefill=\(kvPrefillLength) capacity=\(kvCacheCapacity) tokens=\(tokenCount) layers=\(layerCount) retain=\(retainCount) persistent=\(persistent)",
+            steps: &steps
+        )
+
+        let models = try ensureResidentKVModels(
+            layerCount: layerCount,
+            retainCount: persistent ? retainCount : 0,
+            endpointConfig: endpointConfig,
+            decoderConfig: decoderConfig,
+            steps: &steps
+        )
+        let caches = try makeKVCaches(layerCount: layerCount)
+        var predictions: [TokenPrediction] = []
+        let imageBlock: Range<Int>? = (imageBlockBidirectional && imageHidden != nil)
+            ? imageStartPosition..<(imageStartPosition + imageHidden!.count / 3840)
+            : nil
+
+        // ---- Prefill ----
+        let prefillStart = Date()
+        var hidden: MLMultiArray = try autoreleasepool {
+            let embedding = try loadModel(named: sequenceLength.embeddingName, config: makeEmbeddingConfig(), steps: &steps)
+            return try predictEmbedding(model: embedding, inputIDs: inputWindow.values, name: "KV prefill embedding", steps: &steps)
+        }
+        if let imageHidden {
+            let overlaid = try overlayImageHidden(imageHidden, into: hidden, windowStart: imageStartPosition, seqLength: kvPrefillLength)
+            recordStep("Image hidden overlay prefill", detail: "patches=\(overlaid) windowStart=\(imageStartPosition)", steps: &steps)
+        }
+        let prefillMask = try makeCausalMask(
+            seqLength: kvPrefillLength,
+            leftPadCount: inputWindow.leftPadCount,
+            bidirectionalBlock: imageBlock
+        )
+        let prefillPositions = try makePositionIDs(seqLength: kvPrefillLength, start: inputWindow.positionStart, leftPadCount: inputWindow.leftPadCount)
+        for layer in 0..<layerCount {
+            hidden = try autoreleasepool { () throws -> MLMultiArray in
+                let model = try loadModel(named: kvPrefillName(layer: layer), config: decoderConfig, steps: &steps)
+                let output = try timedPrediction(
+                    name: "KV prefill layer \(layer)",
+                    model: model,
+                    provider: MLDictionaryFeatureProvider(dictionary: [
+                        "x": MLFeatureValue(multiArray: hidden),
+                        "position_ids": MLFeatureValue(multiArray: prefillPositions),
+                        "attention_mask": MLFeatureValue(multiArray: prefillMask)
+                    ]),
+                    steps: &steps
+                )
+                let cache = caches[layer]
+                try copyKVBlock(try requireArray(named: "k_block", output: output), into: cache.kBuffer, cache: cache)
+                try copyKVBlock(try requireArray(named: "v_block", output: output), into: cache.vBuffer, cache: cache)
+                return try requireArray(named: "y", output: output)
+            }
+        }
+        var written = kvPrefillLength
+        let lastHidden = try copyLastToken(from: hidden, sequenceLength: sequenceLength)
+        var logits = try predictLMHead(model: models.lmHead.model, hidden: lastHidden, name: "KV LM head token 1", steps: &steps)
+        var token = try topLogit(logits)
+        recordStep("Top logits token 1", detail: topLogitsSummary(logits, count: 5), steps: &steps)
+        appendStep(ProbeStep(
+            name: "Token 1 total",
+            seconds: Date().timeIntervalSince(prefillStart),
+            memoryMB: ProbeMemory.currentMB(),
+            detail: "#\(token.index) logit=\(String(format: "%.3f", token.logit)) (prefill)"
+        ), to: &steps)
+        predictions.append(TokenPrediction(step: 1, index: token.index, logit: token.logit))
+        onToken?(token.index)
+
+        // ---- Decode loop ----
+        var step = 2
+        while step <= tokenCount {
+            if let stopReason = generationStopReason(predictions: predictions, latestTokenID: token.index) {
+                recordStep("Stop generation", detail: stopReason, steps: &steps)
+                break
+            }
+            let tokenStart = Date()
+            let currentToken = token
+            token = try autoreleasepool { () throws -> (index: Int, logit: Float) in
+                var x = try predictEmbedding(
+                    model: models.embeddingSeq1,
+                    inputIDs: [Int32(currentToken.index)],
+                    name: "KV embedding token \(step)",
+                    steps: &steps
+                )
+                let position = try MLMultiArray(shape: [1, 1], dataType: .int32)
+                // RoPE position is the real-token-relative index (prefill numbers
+                // real tokens 0,1,2,... after the left pad), while the cache slot
+                // is the absolute buffer index. They differ by leftPadCount.
+                position[0] = NSNumber(value: written - inputWindow.leftPadCount)
+                let mask = try makeKVDecodeMask(leftPadCount: inputWindow.leftPadCount, written: written)
+                for layer in 0..<layerCount {
+                    let name = kvDecodeName(layer: layer)
+                    let model: MLModel
+                    if let resident = models.decoders[name] {
+                        model = resident
+                    } else {
+                        model = try loadModel(named: name, config: decoderConfig, steps: &steps)
+                    }
+                    let cache = caches[layer]
+                    let output = try timedPrediction(
+                        name: "KV decode layer \(layer) token \(step)",
+                        model: model,
+                        provider: MLDictionaryFeatureProvider(dictionary: [
+                            "x": MLFeatureValue(multiArray: x),
+                            "position_ids": MLFeatureValue(multiArray: position),
+                            "attention_mask": MLFeatureValue(multiArray: mask),
+                            "k_cache": MLFeatureValue(multiArray: cache.kBuffer),
+                            "v_cache": MLFeatureValue(multiArray: cache.vBuffer)
+                        ]),
+                        steps: &steps
+                    )
+                    writeKVSlot(try requireArray(named: "k_new", output: output), into: cache.kBuffer, cache: cache, slot: written)
+                    writeKVSlot(try requireArray(named: "v_new", output: output), into: cache.vBuffer, cache: cache, slot: written)
+                    x = try requireArray(named: "y", output: output)
+                }
+                written += 1
+                logits = try predictLMHead(model: models.lmHead.model, hidden: x, name: "KV LM head token \(step)", steps: &steps)
+                return try topLogit(logits)
+            }
+            recordStep("Top logits token \(step)", detail: topLogitsSummary(logits, count: 5), steps: &steps)
+            appendStep(ProbeStep(
+                name: "Token \(step) total",
+                seconds: Date().timeIntervalSince(tokenStart),
+                memoryMB: ProbeMemory.currentMB(),
+                detail: "#\(token.index) logit=\(String(format: "%.3f", token.logit))"
+            ), to: &steps)
+            predictions.append(TokenPrediction(step: step, index: token.index, logit: token.logit))
+            onToken?(token.index)
+            step += 1
+        }
+        if !persistent {
+            releaseResidentKVModels()
+            recordStep("Released KV models", detail: "persistent=false", steps: &steps)
+        }
+        recordGeneratedTokens(predictions, steps: &steps)
+        return predictions
+    }
+
     private static func runLMHead(
         hidden: MLMultiArray,
         config: MLModelConfiguration,
@@ -2620,9 +2957,12 @@ enum ProbeRunner {
     /// real Gemma 4 processor budget; the Seq64/32-patch path stays as the
     /// fallback micro smoke.
     static var imageChatSeq320Available: Bool {
-        ProbeSequenceLength.modelExists(named: "gemma4_12b_embedding_seq320_int4_block32")
-            && ProbeSequenceLength.modelExists(named: ProbeSequenceLength.seq320.decoderName)
-            && ProbeSequenceLength.modelExists(named: imageEmbedder256Name)
+        guard ProbeSequenceLength.modelExists(named: "gemma4_12b_embedding_seq320_int4_block32"),
+              ProbeSequenceLength.modelExists(named: imageEmbedder256Name) else { return false }
+        // The Seq320 window can be driven either by the non-KV per-layer
+        // decoders or by the KV prefill stack; require at least one.
+        return kvChatAvailable
+            || ProbeSequenceLength.modelExists(named: ProbeSequenceLength.seq320.decoderName)
     }
 
     /// Multiplier applied to image_hidden vectors before they overlay the text

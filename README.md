@@ -210,9 +210,17 @@ See [`docs/local-api.md`](docs/local-api.md) for the authenticated curl flow and
 ## Model files
 
 Model weights and compiled Core ML bundles are intentionally excluded from this
-Git repository. See [`docs/model-distribution.md`](docs/model-distribution.md)
-for the recommended Hugging Face layout, licensing notices, and artifact
-format.
+Git repository. The validated practical-chat Core ML packages are published at
+[`lube8163/gemma-4-12b-coreml-iphone-practical-chat`](https://huggingface.co/lube8163/gemma-4-12b-coreml-iphone-practical-chat).
+
+Download, checksum-verify, compile, and stage them with:
+
+```bash
+./scripts/download_hf_gemma4_coreml_models.sh
+```
+
+See [`docs/model-distribution.md`](docs/model-distribution.md) for the artifact
+layout, licensing notices, and publication policy.
 
 ## License
 

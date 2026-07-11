@@ -1,5 +1,8 @@
 # Model distribution
 
+The practical-chat package set is published separately at
+[`lube8163/gemma-4-12b-coreml-iphone-practical-chat`](https://huggingface.co/lube8163/gemma-4-12b-coreml-iphone-practical-chat).
+
 ## Recommendation
 
 Keep source code, conversion scripts, and documentation in GitHub. Publish

@@ -211,6 +211,7 @@ A100 で HF の assisted generation を測ると、greedy で GPU speedup 1.71 �
 ## 参考
 
 - 実装・変換スクリプト：[llm-smallification（GitHub）](https://github.com/lube8163-lab/llm-smallification)
+- 変換済み Core ML モデル：[gemma-4-12b-coreml-iphone-practical-chat（Hugging Face）](https://huggingface.co/lube8163/gemma-4-12b-coreml-iphone-practical-chat)
 - 前回記事：[Gemma 4 12B Unified を Core ML 化して低メモリ iPhone でマルチモーダル経路だけ通す](https://zenn.dev/lube8163/articles/89d24e671d1eaa)
 - [Gemma 4 Multi-Token Prediction (MTP) — Google AI for Developers](https://ai.google.dev/gemma/docs/mtp/overview)
 - [google/gemma-4-12B-it-assistant（MTP ドラフタ）](https://huggingface.co/google/gemma-4-12B-it-assistant)

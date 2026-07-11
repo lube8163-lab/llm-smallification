@@ -197,6 +197,23 @@ The copied `.mlmodelc` bundles remain ignored by git.
 When measuring near the memory limit, disable View Debugging and other optional
 scheme diagnostics so Xcode does not inject extra debugging libraries.
 
+## Local control API
+
+The iPhone chat API is disabled by default. Enable it only for a trusted local
+session from the app's Debug tab. Each activation creates a new bearer token,
+all endpoints require that token, and the server stops when the app enters the
+background. Diagnostic log endpoints are unavailable in Release builds.
+
+See [`docs/local-api.md`](docs/local-api.md) for the authenticated curl flow and
+[`SECURITY.md`](SECURITY.md) for the public-repository security model.
+
+## Model files
+
+Model weights and compiled Core ML bundles are intentionally excluded from this
+Git repository. See [`docs/model-distribution.md`](docs/model-distribution.md)
+for the recommended Hugging Face layout, licensing notices, and artifact
+format.
+
 ## License
 
 Repository scripts and documentation are MIT licensed. Upstream models,

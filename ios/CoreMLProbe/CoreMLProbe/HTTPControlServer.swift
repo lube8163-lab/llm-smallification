@@ -3,9 +3,10 @@ import Foundation
 import Network
 import UIKit
 
-/// Minimal LAN HTTP server so the chat pipeline can be driven and observed
-/// from outside the device (curl from a Mac, a coding agent, CI). Runs inside
-/// the app on `COREML_PROBE_API_PORT` (default 8765).
+/// Opt-in LAN HTTP server so the chat pipeline can be driven and observed from
+/// outside the device (curl from a Mac, a coding agent, CI). The caller must
+/// explicitly enable it and every request requires a per-session bearer token.
+/// Runs inside the app on `COREML_PROBE_API_PORT` (default 8765).
 ///
 /// Endpoints:
 ///   GET  /status            → JSON config/readiness snapshot
@@ -15,14 +16,18 @@ import UIKit
 ///                             turn and returns the assistant reply + timings
 final class HTTPControlServer {
     private let port: UInt16
+    private let authToken: String
     private var listener: NWListener?
+    private var diagnosticsEnabled: Bool
     private weak var chatViewModel: ChatViewModel?
     private let queue = DispatchQueue(label: "http-control-server")
 
     private(set) var lastError: String?
 
-    init(chatViewModel: ChatViewModel) {
+    init(chatViewModel: ChatViewModel, authToken: String, diagnosticsEnabled: Bool) {
         self.chatViewModel = chatViewModel
+        self.authToken = authToken
+        self.diagnosticsEnabled = diagnosticsEnabled
         let environment = ProcessInfo.processInfo.environment
         self.port = environment["COREML_PROBE_API_PORT"].flatMap { UInt16($0) } ?? 8765
     }
@@ -44,6 +49,18 @@ final class HTTPControlServer {
         } catch {
             lastError = String(describing: error)
             print("[CoreMLProbe] HTTP control server failed to start: \(error)")
+        }
+    }
+
+    func stop() {
+        listener?.cancel()
+        listener = nil
+        print("[CoreMLProbe] HTTP control server stopped")
+    }
+
+    func setDiagnosticsEnabled(_ enabled: Bool) {
+        queue.async { [weak self] in
+            self?.diagnosticsEnabled = enabled
         }
     }
 
@@ -94,21 +111,69 @@ final class HTTPControlServer {
     }
 
     private func route(request: HTTPRequest, connection: NWConnection) {
+        guard isAuthorized(request) else {
+            send(
+                connection: connection,
+                status: "401 Unauthorized",
+                body: Data("authorization required\n".utf8),
+                contentType: "text/plain; charset=utf-8"
+            )
+            return
+        }
+
         switch (request.method, request.path) {
         case ("GET", "/status"):
             sendJSON(connection: connection, object: statusObject())
         case ("GET", "/log"):
-            let lines = Int(request.query["lines"] ?? "") ?? 120
+            guard diagnosticsEnabled else {
+                sendDiagnosticsDisabled(connection: connection)
+                return
+            }
+            let lines = min(max(Int(request.query["lines"] ?? "") ?? 120, 1), 500)
             let text = ProbeRunner.stepFileTail(maxLines: lines)
             send(connection: connection, status: "200 OK", body: Data(text.utf8), contentType: "text/plain; charset=utf-8")
         case ("GET", "/chatlog"):
-            let text = ChatSessionLog.readAll()
+            guard diagnosticsEnabled else {
+                sendDiagnosticsDisabled(connection: connection)
+                return
+            }
+            let text = ChatSessionLog.readTail(maxBytes: 512 << 10)
             send(connection: connection, status: "200 OK", body: Data(text.utf8), contentType: "text/plain; charset=utf-8")
         case ("POST", "/generate"):
             handleGenerate(request: request, connection: connection)
         default:
             send(connection: connection, status: "404 Not Found", body: Data("not found\n".utf8), contentType: "text/plain")
         }
+    }
+
+    private func isAuthorized(_ request: HTTPRequest) -> Bool {
+        guard let authorization = request.headers["authorization"] else { return false }
+        let prefix = "bearer "
+        guard authorization.lowercased().hasPrefix(prefix) else { return false }
+        let candidate = String(authorization.dropFirst(prefix.count))
+        return Self.constantTimeEqual(candidate, authToken)
+    }
+
+    private static func constantTimeEqual(_ lhs: String, _ rhs: String) -> Bool {
+        let left = Array(lhs.utf8)
+        let right = Array(rhs.utf8)
+        let count = max(left.count, right.count)
+        var difference = left.count ^ right.count
+        for index in 0..<count {
+            let leftByte = index < left.count ? left[index] : 0
+            let rightByte = index < right.count ? right[index] : 0
+            difference |= Int(leftByte ^ rightByte)
+        }
+        return difference == 0
+    }
+
+    private func sendDiagnosticsDisabled(connection: NWConnection) {
+        send(
+            connection: connection,
+            status: "403 Forbidden",
+            body: Data("diagnostic endpoints disabled\n".utf8),
+            contentType: "text/plain; charset=utf-8"
+        )
     }
 
     private func statusObject() -> [String: Any] {
@@ -221,6 +286,7 @@ final class HTTPControlServer {
     private func send(connection: NWConnection, status: String, body: Data, contentType: String) {
         var header = "HTTP/1.1 \(status)\r\n"
         header += "Content-Type: \(contentType)\r\n"
+        header += "Cache-Control: no-store\r\n"
         header += "Content-Length: \(body.count)\r\n"
         header += "Connection: close\r\n\r\n"
         var payload = Data(header.utf8)
@@ -318,6 +384,7 @@ private struct HTTPRequest {
     let method: String
     let path: String
     let query: [String: String]
+    let headers: [String: String]
     let body: Data
 
     init?(raw: Data) {
@@ -345,13 +412,16 @@ private struct HTTPRequest {
             query = [:]
         }
 
-        var contentLength = 0
+        var parsedHeaders: [String: String] = [:]
         for line in lines.dropFirst() {
             let keyValue = line.split(separator: ":", maxSplits: 1)
-            if keyValue.count == 2, keyValue[0].trimmingCharacters(in: .whitespaces).lowercased() == "content-length" {
-                contentLength = Int(keyValue[1].trimmingCharacters(in: .whitespaces)) ?? 0
+            if keyValue.count == 2 {
+                let key = keyValue[0].trimmingCharacters(in: .whitespaces).lowercased()
+                parsedHeaders[key] = keyValue[1].trimmingCharacters(in: .whitespaces)
             }
         }
+        headers = parsedHeaders
+        let contentLength = Int(parsedHeaders["content-length"] ?? "") ?? 0
 
         let bodyStart = headerEnd.upperBound
         let available = raw.count - raw.distance(from: raw.startIndex, to: bodyStart)
@@ -392,8 +462,9 @@ enum ChatSessionLog {
         }
     }
 
-    static func readAll() -> String {
-        guard let url, let text = try? String(contentsOf: url, encoding: .utf8) else { return "" }
-        return text
+    static func readTail(maxBytes: Int) -> String {
+        guard let url, let data = try? Data(contentsOf: url) else { return "" }
+        let tail = data.suffix(max(maxBytes, 0))
+        return String(decoding: tail, as: UTF8.self)
     }
 }

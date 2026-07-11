@@ -20,3 +20,17 @@ project.xcworkspace/
 xcuserdata/
 *.part
 .DS_Store
+
+# Local credentials and Apple signing material
+.env
+.env.*
+!.env.example
+*.pem
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Device-side diagnostic exports
+**/probe-steps.log
+**/chat-log.jsonl

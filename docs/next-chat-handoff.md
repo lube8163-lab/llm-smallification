@@ -3,7 +3,7 @@
 Use this prompt to continue in a fresh Codex chat.
 
 ```text
-このリポジトリ `/Users/tasuku/Documents/llm小型化` の続きから作業してください。
+このリポジトリの続きから作業してください。
 
 現在の主目的は、Gemma 4 12B Unifiedの text/image/audio 対応という性質を保ちつつ、「一応はマルチモーダル入力に対応したモデル経路がメモリの少ないiPhoneでも動いた」と言える実機smokeを作ることです。速度改善はいったん優先度を下げ、既存の安定text経路 endpoint `CPU` / decoder `All` / 48 layers / Seq64 / 4-layer chunks / Cache `Run end` / Retain 0 を土台として維持します。
 

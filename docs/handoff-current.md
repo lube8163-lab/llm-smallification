@@ -4,7 +4,7 @@ Use this when continuing in a fresh Codex chat.
 
 ## Project
 
-- Repo: `/Users/tasuku/Documents/llm小型化`
+- Repo: repository root
 - GitHub: `https://github.com/lube8163-lab/llm-smallification`
 - Main app: `ios/CoreMLProbe/CoreMLProbe.xcodeproj`
 - Current branch: `main`

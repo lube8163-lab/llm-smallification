@@ -144,12 +144,15 @@ struct ContentView: View {
                 .tag(AppTab.probe)
         }
         .task {
-            chatViewModel.startControlServerIfNeeded()
+            chatViewModel.configureControlServerFromEnvironment()
             if automationConfig.runKind?.usesChat == true {
                 chatViewModel.runIfRequested(automationConfig)
             } else {
                 probeViewModel.runIfRequested(automationConfig)
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIApplication.didEnterBackgroundNotification)) { _ in
+            chatViewModel.handleDidEnterBackground()
         }
     }
 }
@@ -443,11 +446,54 @@ struct ChatScreen: View {
                     }
                 }
 
+                Section("Local API") {
+                    Toggle(
+                        "Enable LAN API",
+                        isOn: Binding(
+                            get: { viewModel.isAPIEnabled },
+                            set: { viewModel.setAPIEnabled($0) }
+                        )
+                    )
+
+                    if viewModel.isAPIEnabled {
+                        LabeledContent("Address", value: viewModel.apiAddress)
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Session token")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(viewModel.apiToken)
+                                .font(.caption2.monospaced())
+                                .textSelection(.enabled)
+                            Button {
+                                UIPasteboard.general.string = viewModel.apiToken
+                            } label: {
+                                Label("Copy Token", systemImage: "doc.on.doc")
+                            }
+                        }
+
+#if DEBUG
+                        Toggle(
+                            "Allow diagnostic logs",
+                            isOn: Binding(
+                                get: { viewModel.apiDiagnosticsEnabled },
+                                set: { viewModel.setAPIDiagnosticsEnabled($0) }
+                            )
+                        )
+#endif
+
+                        Text("同じLAN上から操作できます。共有Wi-Fiでは有効にしないでください。バックグラウンドへ移ると自動停止します。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        Text("デフォルトは無効です。必要なセッションだけ明示的に有効化してください。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
                 Section("Status") {
                     LabeledContent("Memory", value: viewModel.currentMemoryText)
-                    if !viewModel.apiAddress.isEmpty {
-                        LabeledContent("API", value: viewModel.apiAddress)
-                    }
                     LabeledContent("Result", value: viewModel.summary)
                     if !viewModel.generatedTokenText.isEmpty {
                         LabeledContent("Tokens", value: viewModel.generatedTokenText)
@@ -1396,7 +1442,10 @@ final class ChatViewModel: ObservableObject {
     @Published var imageNormSigned = false
     /// Raw waveform frames [1, 32, 640] staged by the HTTP API (audio_b64).
     var attachedAudioFeatures: MLMultiArray?
-    @Published var apiAddress = ""
+    @Published private(set) var isAPIEnabled = false
+    @Published private(set) var apiAddress = ""
+    @Published private(set) var apiToken = ""
+    @Published private(set) var apiDiagnosticsEnabled = false
     @Published var lastStatText = ""
     @Published var streamTick = 0
     /// Human-readable phase shown before the first token streams (prefill has
@@ -1443,19 +1492,87 @@ final class ChatViewModel: ObservableObject {
         streamTick &+= 1
     }
 
-    func startControlServerIfNeeded() {
+    func configureControlServerFromEnvironment() {
+        let environment = ProcessInfo.processInfo.environment
+        guard Self.boolValue(environment["COREML_PROBE_ENABLE_API"]) else { return }
+        let configuredToken = environment["COREML_PROBE_API_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let token = configuredToken.flatMap { $0.count >= 16 ? $0 : nil } ?? Self.makeSessionToken()
+        let diagnostics = Self.diagnosticsAvailable
+            && Self.boolValue(environment["COREML_PROBE_API_DIAGNOSTICS"])
+        startControlServer(token: token, diagnosticsEnabled: diagnostics)
+    }
+
+    func setAPIEnabled(_ enabled: Bool) {
+        if enabled {
+            startControlServer(token: Self.makeSessionToken(), diagnosticsEnabled: false)
+        } else {
+            stopControlServer()
+        }
+    }
+
+    func setAPIDiagnosticsEnabled(_ enabled: Bool) {
+        let effectiveValue = Self.diagnosticsAvailable && enabled && isAPIEnabled
+        apiDiagnosticsEnabled = effectiveValue
+        controlServer?.setDiagnosticsEnabled(effectiveValue)
+    }
+
+    func handleDidEnterBackground() {
+        stopControlServer()
+        ProbeRunner.releaseResidentChatModels()
+    }
+
+    private func startControlServer(token: String, diagnosticsEnabled: Bool) {
         guard controlServer == nil else { return }
-        let server = HTTPControlServer(chatViewModel: self)
+        let server = HTTPControlServer(
+            chatViewModel: self,
+            authToken: token,
+            diagnosticsEnabled: diagnosticsEnabled
+        )
         server.start()
+        guard server.lastError == nil else {
+            summary = "API start failed: \(server.lastError ?? "unknown error")"
+            return
+        }
         controlServer = server
+        isAPIEnabled = true
         apiAddress = server.displayAddress
-        NotificationCenter.default.addObserver(
-            forName: UIApplication.didEnterBackgroundNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            // Do not hold the resident decoder set while backgrounded.
-            ProbeRunner.releaseResidentChatModels()
+        apiToken = token
+        apiDiagnosticsEnabled = Self.diagnosticsAvailable && diagnosticsEnabled
+    }
+
+    private func stopControlServer() {
+        let previousToken = apiToken
+        controlServer?.stop()
+        controlServer = nil
+        isAPIEnabled = false
+        apiAddress = ""
+        apiToken = ""
+        apiDiagnosticsEnabled = false
+        if !previousToken.isEmpty, UIPasteboard.general.string == previousToken {
+            UIPasteboard.general.string = ""
+        }
+    }
+
+    private static var diagnosticsAvailable: Bool {
+#if DEBUG
+        true
+#else
+        false
+#endif
+    }
+
+    private static func makeSessionToken() -> String {
+        UUID().uuidString.replacingOccurrences(of: "-", with: "")
+            + UUID().uuidString.replacingOccurrences(of: "-", with: "")
+    }
+
+    private static func boolValue(_ rawValue: String?) -> Bool {
+        guard let rawValue else { return false }
+        switch rawValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        default:
+            return false
         }
     }
 

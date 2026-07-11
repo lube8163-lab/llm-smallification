@@ -2218,6 +2218,19 @@ enum ProbeRunner {
         String(format: "gemma4_12b_layer%02d_decode_kv%d_pal4_g16", layer, kvCacheCapacity)
     }
 
+    /// The full-attention decode layers (MQA 1x512 with a 513-key concat) fail
+    /// the ANE execution-plan build intermittently (error -5, ~1.4GB compile
+    /// spike). Their pal4 weights still run fine on CPU+GPU, so route just those
+    /// 8 layers off the ANE; the 40 sliding-attention decode layers stay on ANE.
+    /// `COREML_PROBE_KV_FULL_ANE=1` forces them back for A/B.
+    private static let kvFullLayerForcesANE: Bool =
+        ProcessInfo.processInfo.environment["COREML_PROBE_KV_FULL_ANE"] == "1"
+
+    private static func kvDecodeConfig(layer: Int, base: MLModelConfiguration) -> MLModelConfiguration {
+        guard layer % 6 == 5, !kvFullLayerForcesANE else { return base }
+        return makeConfig(.cpuAndGPU)
+    }
+
     private static let kvEmbeddingSeq1Name = "gemma4_12b_embedding_seq1_int4_block32"
 
     /// True when the whole KV stack is bundled (checked at the endpoints and
@@ -2338,7 +2351,7 @@ enum ProbeRunner {
         var decoders: [String: MLModel] = [:]
         for layer in 0..<min(retainCount, layerCount) {
             let name = kvDecodeName(layer: layer)
-            decoders[name] = try loadModel(named: name, config: decoderConfig, steps: &steps)
+            decoders[name] = try loadModel(named: name, config: kvDecodeConfig(layer: layer, base: decoderConfig), steps: &steps)
         }
         let models = KVChatModels(
             embeddingSeq1: try loadModel(named: kvEmbeddingSeq1Name, config: makeEmbeddingConfig(), steps: &steps),
@@ -2470,7 +2483,7 @@ enum ProbeRunner {
                     if let resident = models.decoders[name] {
                         model = resident
                     } else {
-                        model = try loadModel(named: name, config: decoderConfig, steps: &steps)
+                        model = try loadModel(named: name, config: kvDecodeConfig(layer: layer, base: decoderConfig), steps: &steps)
                     }
                     let cache = caches[layer]
                     let output = try timedPrediction(

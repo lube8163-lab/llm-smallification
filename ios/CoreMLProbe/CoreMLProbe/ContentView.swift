@@ -180,11 +180,23 @@ struct SimpleChatScreen: View {
                         }
 
                         ForEach(viewModel.messages) { message in
-                            SimpleChatBubble(message: message)
-                                .id(message.id)
+                            SimpleChatBubble(
+                                message: message,
+                                showTyping: message.role == .assistant
+                                    && message.text.isEmpty
+                                    && !message.isError
+                                    && viewModel.isGenerating,
+                                phase: viewModel.generationPhase
+                            )
+                            .id(message.id)
                         }
 
-                        if viewModel.isGenerating {
+                        if viewModel.isGenerating && !viewModel.generationPhase.isEmpty {
+                            // Prefill / encode phase: the empty assistant bubble
+                            // already shows the phase + typing dots, so keep the
+                            // footer quiet to avoid a duplicate spinner.
+                            EmptyView()
+                        } else if viewModel.isGenerating {
                             HStack(spacing: 8) {
                                 ProgressView()
                                 Text("生成中…")
@@ -256,6 +268,8 @@ struct SimpleChatScreen: View {
 
 struct SimpleChatBubble: View {
     let message: ChatMessage
+    var showTyping: Bool = false
+    var phase: String = ""
 
     var body: some View {
         HStack {
@@ -271,9 +285,20 @@ struct SimpleChatBubble: View {
                         .frame(maxWidth: 200, maxHeight: 200)
                         .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
-                Text(message.isError ? (message.detail ?? message.text) : message.text)
-                    .font(.body)
-                    .textSelection(.enabled)
+                if showTyping {
+                    HStack(spacing: 8) {
+                        TypingDots()
+                        if !phase.isEmpty {
+                            Text(phase)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } else {
+                    Text(message.isError ? (message.detail ?? message.text) : message.text)
+                        .font(.body)
+                        .textSelection(.enabled)
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
@@ -291,6 +316,34 @@ struct SimpleChatBubble: View {
             }
         }
         .padding(.horizontal, 12)
+    }
+}
+
+/// Three dots that fade in sequence — a lightweight "thinking" indicator for
+/// the gap before the first decoded token streams in.
+struct TypingDots: View {
+    @State private var phase = 0.0
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .frame(width: 7, height: 7)
+                    .foregroundStyle(.secondary)
+                    .opacity(opacity(for: index))
+            }
+        }
+        .onAppear {
+            withAnimation(.easeInOut(duration: 0.9).repeatForever(autoreverses: false)) {
+                phase = 3
+            }
+        }
+    }
+
+    private func opacity(for index: Int) -> Double {
+        let distance = (phase - Double(index)).truncatingRemainder(dividingBy: 3)
+        let wrapped = distance < 0 ? distance + 3 : distance
+        return 0.3 + 0.7 * max(0, 1 - wrapped)
     }
 }
 
@@ -1346,6 +1399,10 @@ final class ChatViewModel: ObservableObject {
     @Published var apiAddress = ""
     @Published var lastStatText = ""
     @Published var streamTick = 0
+    /// Human-readable phase shown before the first token streams (prefill has
+    /// no per-token callback, so this fills the otherwise blank "thinking" gap).
+    /// Cleared on the first decoded token, when the reply starts flowing.
+    @Published var generationPhase = ""
     private var didAutoRun = false
     private var controlServer: HTTPControlServer?
     private var streamingMessageID: UUID?
@@ -1365,6 +1422,8 @@ final class ChatViewModel: ObservableObject {
     func streamToken(_ tokenID: Int) {
         guard let id = streamingMessageID,
               let index = messages.firstIndex(where: { $0.id == id }) else { return }
+        // First decoded token = prefill done, reply is now streaming.
+        if streamingTokens.isEmpty { generationPhase = "" }
         streamingTokens.append(tokenID)
         messages[index].text = TokenDisplay.joinedLabels(for: streamingTokens)
         messages[index].tokens = streamingTokens
@@ -1511,6 +1570,7 @@ final class ChatViewModel: ObservableObject {
         messageText = ""
         isGenerating = true
         summary = "Generating"
+        generationPhase = "考え中…"
         generatedTokenText = ""
         currentMemoryText = ProbeMemory.currentText()
         messages.append(ChatMessage(
@@ -1586,6 +1646,7 @@ final class ChatViewModel: ObservableObject {
 
             currentMemoryText = ProbeMemory.currentText()
             isGenerating = false
+        generationPhase = ""
             completion?(success, completionSummary)
         }
     }
@@ -1635,6 +1696,7 @@ final class ChatViewModel: ObservableObject {
         photoItem = nil
         isGenerating = true
         summary = "Generating (image)"
+        generationPhase = "画像を見ています…"
         generatedTokenText = ""
         currentMemoryText = ProbeMemory.currentText()
         messages.append(ChatMessage(
@@ -1711,6 +1773,7 @@ final class ChatViewModel: ObservableObject {
 
             currentMemoryText = ProbeMemory.currentText()
             isGenerating = false
+        generationPhase = ""
             completion?(success, completionSummary)
         }
     }
@@ -1750,6 +1813,7 @@ final class ChatViewModel: ObservableObject {
         attachedAudioFeatures = nil
         isGenerating = true
         summary = "Generating (audio)"
+        generationPhase = "音声を聞いています…"
         generatedTokenText = ""
         currentMemoryText = ProbeMemory.currentText()
         messages.append(ChatMessage(
@@ -1824,6 +1888,7 @@ final class ChatViewModel: ObservableObject {
 
             currentMemoryText = ProbeMemory.currentText()
             isGenerating = false
+        generationPhase = ""
             completion?(success, completionSummary)
         }
     }

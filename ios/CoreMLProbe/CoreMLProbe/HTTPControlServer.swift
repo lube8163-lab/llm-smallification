@@ -165,6 +165,8 @@ final class HTTPControlServer {
         if let imageScale = body["image_scale"] as? Double {
             ProbeRunner.imageHiddenScale = Float(imageScale)
         }
+        // Optional decoder retain count for KV decode residency sweeps.
+        let retain = body["retain"] as? Int
         let started = Date()
 
         DispatchQueue.main.async { [weak self] in
@@ -175,6 +177,7 @@ final class HTTPControlServer {
             }
             // tokens=0 (or omitted-as-0) means auto: run until <eos>.
             if let tokens { vm.generatedTokenCount = min(max(tokens, 0), ProbeRunner.maxGeneratedTokenCount) }
+            if let retain { vm.retainedDecoderModelCount = max(0, retain) }
             if let image {
                 vm.attachedImage = image
                 vm.imageNormSigned = normSigned

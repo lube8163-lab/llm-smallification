@@ -175,6 +175,11 @@ final class HTTPControlServer {
                 self.send(connection: connection, status: "409 Conflict", body: Data("generation already running\n".utf8), contentType: "text/plain")
                 return
             }
+            // API overrides (tokens / retain) are per-request experiment knobs:
+            // remember the user's UI values and restore them once the run ends,
+            // so a curl benchmark can't leave the chat capped at e.g. 6 tokens.
+            let previousTokenCount = vm.generatedTokenCount
+            let previousRetainCount = vm.retainedDecoderModelCount
             // tokens=0 (or omitted-as-0) means auto: run until <eos>.
             if let tokens { vm.generatedTokenCount = min(max(tokens, 0), ProbeRunner.maxGeneratedTokenCount) }
             if let retain { vm.retainedDecoderModelCount = max(0, retain) }
@@ -188,6 +193,8 @@ final class HTTPControlServer {
             vm.messageText = prompt
             vm.send { success, summary in
                 DispatchQueue.main.async {
+                    vm.generatedTokenCount = previousTokenCount
+                    vm.retainedDecoderModelCount = previousRetainCount
                     let reply = vm.messages.last(where: { $0.role == .assistant })
                     let object: [String: Any] = [
                         "ok": success,

@@ -3,6 +3,9 @@
 The practical-chat package set is published separately at
 [`lube8163/gemma-4-12b-coreml-iphone-practical-chat`](https://huggingface.co/lube8163/gemma-4-12b-coreml-iphone-practical-chat).
 
+The LLaDA-MoE dLLM/GGUF side experiment is now maintained separately at
+[`lube8163-lab/llada-iphone-dllm`](https://github.com/lube8163-lab/llada-iphone-dllm).
+
 ## Recommendation
 
 Keep source code, conversion scripts, and documentation in GitHub. Publish

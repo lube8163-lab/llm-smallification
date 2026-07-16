@@ -40,6 +40,13 @@ for the detailed run log and measurements.
 Ignored local/output directories include `models/`, `logs/`, `external/`, and
 `runpod-artifacts/`.
 
+## Related side experiment
+
+The LLaDA-MoE dLLM/GGUF iPhone probe has been split into its own repository:
+[`lube8163-lab/llada-iphone-dllm`](https://github.com/lube8163-lab/llada-iphone-dllm).
+This repository keeps the Gemma 4 Core ML path focused and does not carry the
+`DiffusionProbe` iOS target or GGUF-specific helper scripts.
+
 ## iOS Core ML Probe
 
 After copying selected compiled Core ML bundles from RunPod into

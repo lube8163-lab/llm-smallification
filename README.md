@@ -1,236 +1,142 @@
 # LLM Smallification
 
-Experiments for pushing a 12B-class Gemma 4 model toward an 8 GB iPhone target
-with Core ML/Core AI style splitting, sequential loading, and aggressive weight
-compression.
+Gemma 4 12BをCore MLへ分割・量子化し、iPhone上で完全オフラインの
+テキスト／画像／音声チャットを動かす実験リポジトリです。変換スクリプト、
+SwiftUI実機プローブ、計測・品質評価ツール、実験記録を公開しています。
 
-The repository tracks scripts, notes, patches, and experiment reports. It does
-not include model weights, GGUF files, Core ML packages, compiled models, or
-RunPod artifacts.
+モデル本体や端末依存の`.mlmodelc`はGitへ含めず、配布可能な`.mlpackage`を
+[Hugging Face](https://huggingface.co/lube8163/gemma-4-12b-coreml-iphone-practical-chat)
+で公開しています。
 
-## Current Focus
+## 現在の到達点
 
-- Baseline `llama.cpp`/GGUF behavior on an 8 GB Apple Silicon Mac.
-- Convert Gemma 4 12B text components to Core ML MLProgram packages.
-- Compress decoder layers, embedding, and lm head with CoreMLTools int4
-  blockwise quantization.
-- Prepare an iOS harness that can measure load, prediction, release, and memory
-  behavior on an actual 8 GB iPhone.
+- 48層のpal4 decoder、Seq320 prefill、KV cache 512による長文生成
+- Gemma 4公式MTP drafterを使ったgreedy投機デコード
+- 256-token画像embedderと32-token音声embedderを同じKV生成経路へ統合
+- iPhone世代別のfull-attention実行先と、融合モデルの実行先を自動選択
+- 実機ログの速度・メモリ・投機受理率の機械検証
 
-## Key Results
+代表的なwarm runは次の通りです。短い質問、初回コンパイル、プロンプト、
+MTP受理率で値は大きく変わるため、単一の数字を普遍的な速度とは扱っていません。
 
-- Full Gemma 4 12B QAT-unquantized BF16 reference load succeeded on RunPod A100.
-- All 48 text decoder layers converted to fixed-shape Core ML MLProgram
-  packages and compressed with int4 block32.
-- Decoder layer package total: about 5.715 GiB.
-- Text-only package estimate with embedding and lm head: about 6.77 GiB.
-- Selected int4 packages compiled and ran through local macOS Core ML runtime.
+| 実機・条件 | 結果 |
+|---|---:|
+| iPhone 14、8-token高受理プローブ | 通常4.93秒/token → 投機2.06秒/token（2.40倍） |
+| iPhone 14、24-token低受理プローブ | 4.20秒/token → 4.12秒/token（1.9%短縮） |
+| iPhone 17、24-token、従来48分割 | 43.16秒、0.556 token/s |
+| iPhone 17、先頭6層融合 | 37.56秒、0.639 token/s（13.0%短縮） |
 
-See [docs/2026-06-27-runpod-coreml-probe.md](docs/2026-06-27-runpod-coreml-probe.md)
-for the detailed run log and measurements.
+すべての上記A/Bでtargetのgreedy token IDは一致しました。品質診断では短答・JSON・
+簡単なSwift・画像・音声が機能する一方、算術誤答、冗長な前置き、特殊token流出など、
+元モデル／変換後モデル／ランタイムを分離して追うべき課題も確認しています。
 
-## Layout
+詳細:
 
-- `docs/`: experiment plans and measured results.
-- `scripts/`: local and RunPod helper scripts.
-- `patches/`: patch files for external probes such as `llama.cpp` SwiftUI.
-- `ios/CoreMLProbe/`: an iOS SwiftUI harness for measuring Core ML load,
-  prediction, release, and memory behavior.
+- [速度改善の調査記録](docs/decode-speedup-research.md)
+- [iPhone 17の速度逆転と6層融合](docs/iphone17-speed-root-cause-2026-07-24.md)
+- [iPhone 14の品質診断](docs/model-quality-iphone14-2026-07-23.md)
+- [iPhone 14 / 17の品質比較](docs/model-quality-iphone17-comparison-2026-07-24.md)
+- [実用チャット化の記事](docs/articles/gemma4-12b-coreml-iphone-practical-chat.md)
+- [投機デコードとA19最適化の続編](docs/articles/gemma4-12b-coreml-iphone-speculative-decoding.md)
 
-Ignored local/output directories include `models/`, `logs/`, `external/`, and
-`runpod-artifacts/`.
+## ディレクトリ
 
-## Related side experiment
-
-The LLaDA-MoE dLLM/GGUF iPhone probe has been split into its own repository:
-[`lube8163-lab/llada-iphone-dllm`](https://github.com/lube8163-lab/llada-iphone-dllm).
-This repository keeps the Gemma 4 Core ML path focused and does not carry the
-`DiffusionProbe` iOS target or GGUF-specific helper scripts.
-
-## iOS Core ML Probe
-
-After copying selected compiled Core ML bundles from RunPod into
-`runpod-artifacts/compiled`, stage the app-local model assets:
-
-```bash
-./scripts/compile_coreml_probe_packages.sh
-./scripts/prepare_ios_coreml_probe_assets.sh
+```text
+docs/                 実験結果、設計メモ、記事原稿
+ios/CoreMLProbe/      SwiftUI実機プローブ
+scripts/              変換、配置、実機自動試験、ログ解析
+patches/              外部プロジェクト向け差分
 ```
 
-When updating only the corrected generation endpoint, run the RunPod-side
-conversion/package wrapper, transfer the resulting endpoint package or archive
-back to the Mac, then refresh the app-local endpoint:
+`models/`、`runpod-artifacts/`、実機ログ、Xcode生成物、`.mlpackage`、
+`.mlmodelc`はローカル成果物としてGit管理外です。
 
-```bash
-./scripts/setup_runpod_coreml_endpoint_env.sh
-./scripts/runpod_refresh_gemma4_coreml_endpoint.sh
-./scripts/import_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>
-```
+LLaDA-MoEのdLLM/GGUF実験は
+[`lube8163-lab/llada-iphone-dllm`](https://github.com/lube8163-lab/llada-iphone-dllm)
+へ分離しています。
 
-The RunPod wrapper runs `runpod_preflight_gemma4_coreml_endpoint.sh` first to
-check the model path, Python dependencies, CUDA visibility, writable output
-paths, and disk space before starting conversion.
+## モデルを取得する
 
-Then build the probe app for a simulator:
-
-```bash
-./scripts/build_coreml_probe_ios.sh
-```
-
-The simulator app can auto-run the probe and print `[CoreMLProbe]` lines:
-
-```bash
-xcrun simctl launch --console booted lab.lube8163.CoreMLProbe --autorun
-```
-
-For iPhone memory triage, start with CPU-only single-model loads before trying
-the full pipeline. Useful scheme arguments or launch environment values:
-
-```bash
---autorun --mode=load-embedding
---autorun --mode=load-decoder
---autorun --mode=load-lm-head
---autorun --mode=load-all-sequential
---autorun --mode=load-decoder-stack --layers=16
---autorun --mode=decoder-stack --layers=16
---autorun --mode=full-sequential
---autorun --mode=full-stack-sequential --layers=16
---autorun --mode=generate-one-token --layers=48 --input-ids=2,123,4567,106
---autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=2
---autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=2 --cache-policy=every-8-layers
---autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=8 --cache-policy=run-end-only
---autorun --mode=generate-token-loop --layers=8 --input-ids=2,123,4567,106 --tokens=1 --cache-policy=run-end-only --decoder-compute=cpuAndGPU --endpoint-compute=cpuOnly
---autorun --mode=generate-token-loop --layers=48 --input-ids=2,123,4567,106 --tokens=8 --cache-policy=run-end-only --endpoint-compute=cpuOnly --decoder-compute=cpuAndGPU
-```
-
-```bash
-COREML_PROBE_MODE=load-lm-head
-COREML_PROBE_COMPUTE=cpuOnly
-COREML_PROBE_DECODER_COMPUTE=cpuAndGPU
-COREML_PROBE_ENDPOINT_COMPUTE=cpuOnly
-COREML_PROBE_LAYERS=16
-COREML_PROBE_INPUT_IDS=2,123,4567,106
-COREML_PROBE_GENERATE_TOKENS=8
-COREML_PROBE_CACHE_POLICY=run-end-only
-```
-
-The app defaults to `load-embedding` and `cpuOnly` to avoid loading multiple
-large bundles on the first run. Decoder stack modes default to the first 8
-layers and can be limited to `1`, `2`, `4`, `8`, `16`, `24`, `32`, `48`, or
-`all`. Try `full-sequential` only after the individual loads and synthetic
-predictions pass. When additional decoder layer bundles are present in
-`Models/`, `load-decoder-stack`, `decoder-stack`, and `full-stack-sequential`
-discover them automatically by layer index.
-
-`generate-token-loop` keeps the fixed 4-token window, appends each argmax token,
-and slides the window for a very short generation loop. It reuses the embedding
-and LM head models across generated tokens, while decoder layers still use the
-safer load/predict/release path.
-
-The Chat tab is a probe wrapper over that fixed token window. Plain message text
-is not tokenized on device yet. To change the model input from the composer,
-paste `input_ids_last4=...`, `input_ids=...`, four `#123`-style IDs, or four raw
-IDs; otherwise the current `Token window` field is used and the app shows that
-source in the message detail. If generation collapses to the same token in all 4
-positions, the runner logs `Repeated input window` before continuing.
-
-For generation quality probes, the preferred endpoint is now
-`gemma4_12b_norm_lm_head_1tok_int4_block32.mlmodelc`, produced by
-`scripts/runpod_convert_gemma4_coreml_endpoints.py`. It applies the final
-language-model RMSNorm and Gemma final logit softcap before lm_head. If that
-bundle is not present, the app falls back to the older linear-only
-`gemma4_12b_lm_head_1tok_int4_block32.mlmodelc` and logs `LM head fallback`.
-With the preferred endpoint present, it logs `LM head target` before loading the
-norm+lm_head bundle.
-
-The UI and launch arguments allow separate compute-unit choices for the large
-decoder packages and the endpoint packages (embedding and LM head). Use
-`COREML_PROBE_DECODER_COMPUTE` / `--decoder-compute=` and
-`COREML_PROBE_ENDPOINT_COMPUTE` / `--endpoint-compute=` for this split. The
-single `COREML_PROBE_COMPUTE` / `--compute=` setting remains as a shared
-fallback. For accelerator probing on iPhone, start with `--layers=1`,
-`--layers=8`, then `16`, `32`, and finally `48`, keeping
-`--cache-policy=run-end-only` and `--tokens=1` until the smaller run is stable.
-The fastest stable measured split is endpoint `CPU` with decoder `CPU+GPU`; on
-an iPhone18,3 this completed all 48 layers for 8 generated tokens with about
-`316 MB` peak memory and about `13.7 sec/token` after the first token. Endpoint
-`All` exceeded the iOS high-water memory limit during endpoint model load, so
-endpoint modes that include ANE are hidden in the UI and blocked before load for
-endpoint-using modes. The generated token count can be raised up to `32`, but
-the default stays at `2` because full 48-layer generation is still slow.
-
-The cache policy controls how often `com.apple.e5rt.e5bundlecache` is removed
-after model release. Supported values are `every-model` (default/safest),
-`every-4-layers`, `every-8-layers`, `per-token`, and `run-end-only`.
-
-Until an on-device tokenizer is bundled, use the host helper to convert a prompt
-into the fixed 4-token app window or decode generated IDs:
-
-```bash
-python3 -m pip install transformers sentencepiece jinja2
-python3 scripts/gemma4_token_helper.py --prompt "Hello"
-python3 scripts/gemma4_token_helper.py --decode-ids 253027,253027
-```
-
-Copy the helper's `input_ids_last4=...` line into the Chat composer or the
-`Token window` field to make the prompt affect generation. The helper defaults
-to the raw prompt tokens because a full chat template often leaves only the
-assistant-prefix tokens in the 4-token window; pass `--chat-template` only when
-you explicitly want to inspect that template form.
-
-After a device run, save the Xcode console output and check the endpoint and
-generation summary:
-
-```bash
-./scripts/analyze_coreml_probe_log.py coremlprobe.log \
-  --require-norm-lm-head \
-  --fail-on-repeat \
-  --expect-layers 48 \
-  --min-generated-tokens 8 \
-  --max-peak-mb 350
-```
-
-The lower-level refresh and preflight scripts remain available when you want to
-run the steps separately:
-
-```bash
-./scripts/refresh_coreml_probe_endpoint.sh <endpoint-mlpackage-dir-or-tar.gz>
-./scripts/preflight_coreml_probe_device.sh
-```
-
-For an actual iPhone, open `ios/CoreMLProbe/CoreMLProbe.xcodeproj` in Xcode,
-select a signing team, choose the device, and run the `CoreMLProbe` scheme.
-The copied `.mlmodelc` bundles remain ignored by git.
-When measuring near the memory limit, disable View Debugging and other optional
-scheme diagnostics so Xcode does not inject extra debugging libraries.
-
-## Local control API
-
-The iPhone chat API is disabled by default. Enable it only for a trusted local
-session from the app's Debug tab. Each activation creates a new bearer token,
-all endpoints require that token, and the server stops when the app enters the
-background. Diagnostic log endpoints are unavailable in Release builds.
-
-See [`docs/local-api.md`](docs/local-api.md) for the authenticated curl flow and
-[`SECURITY.md`](SECURITY.md) for the public-repository security model.
-
-## Model files
-
-Model weights and compiled Core ML bundles are intentionally excluded from this
-Git repository. The validated practical-chat Core ML packages are published at
-[`lube8163/gemma-4-12b-coreml-iphone-practical-chat`](https://huggingface.co/lube8163/gemma-4-12b-coreml-iphone-practical-chat).
-
-Download, checksum-verify, compile, and stage them with:
+実用チャット用の基本モデルだけを取得・検証・コンパイル・配置します。
 
 ```bash
 ./scripts/download_hf_gemma4_coreml_models.sh
 ```
 
-See [`docs/model-distribution.md`](docs/model-distribution.md) for the artifact
-layout, licensing notices, and publication policy.
+投機デコードと実測採用した先頭6層融合モデルも加える場合:
+
+```bash
+HF_MODEL_PROFILE=speculative \
+  ./scripts/download_hf_gemma4_coreml_models.sh
+```
+
+ダウンロードだけ行う場合は`DOWNLOAD_ONLY=1`、既存コンパイルを作り直す場合は
+`FORCE=1`を指定します。Xcode、Apple signing team、十分なMac／iPhoneストレージが
+別途必要です。配布構成とライセンスは
+[docs/model-distribution.md](docs/model-distribution.md)を参照してください。
+
+## 変換
+
+主な変換スクリプト:
+
+- `scripts/runpod_convert_gemma4_coreml_kv.py`: 単層prefill/decode/verify
+- `scripts/runpod_convert_drafter_coreml.py`: MTP drafter
+- `scripts/runpod_convert_gemma4_coreml_kv_fused.py`: 6層融合prefill/verify
+
+変換はCUDA GPU環境、コンパイルと実機実行はmacOS/Xcode環境で行います。実測採用した
+融合範囲は層00...05だけです。層06...11を加えると同じiPhone 17試験で5.4%遅く
+なったため、配布対象にしていません。
+
+## iPhoneへビルド・実行
+
+モデル配置後、署名teamを環境変数で指定できます。
+
+```bash
+COREML_PROBE_DEVELOPMENT_TEAM=YOUR_TEAM_ID \
+  ./scripts/build_coreml_probe_ios.sh 'generic/platform=iOS'
+```
+
+自動試験例:
+
+```bash
+COREML_PROBE_DEVICE=DEVICE_UDID \
+COREML_PROBE_CHAT_PROMPT='Swiftで整数nの二乗を返す関数を書いてください。' \
+COREML_PROBE_GENERATE_TOKENS=24 \
+  ./scripts/run_coreml_probe_device_automation.sh \
+  --kind chat \
+  --require-speculative
+```
+
+主なA/B環境変数:
+
+- `COREML_PROBE_DISABLE_SPECULATIVE=1`: target-only KV decode
+- `COREML_PROBE_SPECULATIVE_TREE=0`: linear verifyだけを使用
+- `COREML_PROBE_KV_FULL_ANE=0|1`: full-attention層の実行先
+- `COREML_PROBE_DRAFTER_COMPUTE=cpuAndGPU|all`
+- `COREML_PROBE_FUSED_COMPUTE=cpuAndGPU|all`
+- `COREML_PROBE_RETAIN_VERIFY=N`: verify常駐数（診断用、既定0）
+
+ローカルAPIは既定で無効です。信頼できるLAN内でDebugタブから明示的に有効化し、
+セッションごとのBearer tokenを使います。詳細は
+[docs/local-api.md](docs/local-api.md)と[SECURITY.md](SECURITY.md)にあります。
+
+## 品質・ログ検証
+
+```bash
+python3 scripts/bench_coreml_probe_quality.py --profile full
+
+python3 scripts/analyze_coreml_probe_log.py coremlprobe.log \
+  --require-norm-lm-head \
+  --require-speculative \
+  --expect-layers 48 \
+  --min-generated-tokens 8
+```
+
+品質スイートは小規模な診断セットで、MMLU等の統計的ベンチマークではありません。
+端末間比較では同一プロンプト・greedy設定・token上限を揃え、回答文字列だけでなく
+出力token IDも保存します。
 
 ## License
 
-Repository scripts and documentation are MIT licensed. Upstream models,
-tokenizers, and third-party projects remain governed by their own licenses and
-terms.
+リポジトリ内のコードとドキュメントはMIT Licenseです。Gemma 4由来の変換済みモデル、
+tokenizer、第三者プロジェクトは各上流ライセンスと利用条件に従います。

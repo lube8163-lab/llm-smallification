@@ -12,7 +12,10 @@ DEVICE="${COREML_PROBE_DEVICE:-}"
 SKIP_BUILD=0
 SKIP_INSTALL=0
 NO_ANALYZE=0
+REQUIRE_SPECULATIVE=0
+MIN_SPECULATIVE_TOKENS_PER_SWEEP="${MIN_SPECULATIVE_TOKENS_PER_SWEEP:-}"
 RUN_TIMEOUT="${COREML_PROBE_RUN_TIMEOUT:-1800}"
+INSTALL_TIMEOUT="${COREML_PROBE_INSTALL_TIMEOUT:-1800}"
 BUILD_DESTINATION="${BUILD_DESTINATION:-generic/platform=iOS}"
 SEQ_LEN="${SEQ_LEN:-64}"
 EXPECTED_LAYERS="${EXPECTED_LAYERS:-48}"
@@ -42,6 +45,9 @@ Options:
   --min-generated-tokens N
                           Analyzer generated-token floor. Defaults to 1 for
                           chat, token count for probe/tokens32, and 8 for sweeps.
+  --require-speculative   Fail analysis unless the MTP path ran.
+  --min-speculative-tokens-per-sweep N
+                          Fail when verified output per target sweep is below N.
   --log-dir PATH          Output directory for build/install/launch/analyzer logs.
   --skip-build            Reuse the existing Debug-iphoneos app.
   --skip-install          Do not install before launching.
@@ -54,7 +60,17 @@ Environment:
   COREML_PROBE_AUTOMATION_KIND      Default --kind value.
   COREML_PROBE_CHAT_PROMPT          Default --prompt value.
   COREML_PROBE_GENERATE_TOKENS      Default --tokens value.
+  COREML_PROBE_DISABLE_SPECULATIVE  Set to 1 for a seq-1 KV baseline run.
+  COREML_PROBE_DRAFTER_MODEL        Override the bundled MTP drafter name.
+  COREML_PROBE_DRAFTER_COMPUTE      Drafter compute units override.
+  COREML_PROBE_SPECULATIVE_TREE     Set to 0 for linear-only speculative A/B.
+  COREML_PROBE_KV_FULL_ANE          Set to 0/1 to override full-attention routing.
+  COREML_PROBE_FUSED_COMPUTE        Compute units for fused KV groups.
+  COREML_PROBE_RETAIN_VERIFY        Resident verify-layer count (diagnostic; default 0).
+  ENDPOINT_COMPUTE                  Endpoint compute units. Defaults to All for
+                                    pal4 and CPU for int4_block32.
   COREML_PROBE_RUN_TIMEOUT          Default --timeout value.
+  COREML_PROBE_INSTALL_TIMEOUT      App-install timeout (default: 1800 seconds).
   COREML_PROBE_AUTOMATION_LOG_DIR   Default --log-dir value.
   BUILD_DESTINATION                 xcodebuild destination (default: generic/platform=iOS).
   SEQ_LEN, EXPECTED_LAYERS, MAX_PEAK_MB, MIN_GENERATED_TOKENS
@@ -97,6 +113,15 @@ while [[ $# -gt 0 ]]; do
       ;;
     --min-generated-tokens)
       MIN_GENERATED_TOKENS="$2"
+      shift 2
+      ;;
+    --require-speculative)
+      REQUIRE_SPECULATIVE=1
+      shift
+      ;;
+    --min-speculative-tokens-per-sweep)
+      MIN_SPECULATIVE_TOKENS_PER_SWEEP="$2"
+      REQUIRE_SPECULATIVE=1
       shift 2
       ;;
     --log-dir)
@@ -269,7 +294,7 @@ if [[ "$SKIP_INSTALL" == "1" ]]; then
   echo "skip install"
 else
   xcrun devicectl \
-    --timeout 600 \
+    --timeout "$INSTALL_TIMEOUT" \
     --json-output "$INSTALL_JSON" \
     device install app \
     --device "$DEVICE" \
@@ -278,7 +303,17 @@ fi
 
 export COREML_PROBE_AUTORUN="$AUTORUN_KIND"
 export COREML_PROBE_AUTO_EXIT=1
-export COREML_PROBE_ENDPOINT_COMPUTE="${ENDPOINT_COMPUTE:-cpuOnly}"
+if [[ -n "${ENDPOINT_COMPUTE:-}" ]]; then
+  export COREML_PROBE_ENDPOINT_COMPUTE="$ENDPOINT_COMPUTE"
+elif [[ "${ENDPOINT_VARIANT:-}" == "int4_block32" ]]; then
+  # The int4 endpoint can exceed the iPhone high-water limit while Core ML
+  # compiles it for accelerators. Preserve the known-safe CPU path.
+  export COREML_PROBE_ENDPOINT_COMPUTE=cpuOnly
+else
+  # The bundled pal4 norm+lm_head is ANE-compatible. CPU-only took 3-8s per
+  # prediction on iPhone 14, versus ~20ms with Core ML free to select the ANE.
+  export COREML_PROBE_ENDPOINT_COMPUTE=all
+fi
 export COREML_PROBE_DECODER_COMPUTE="${DECODER_COMPUTE:-all}"
 if [[ -n "${DECODER_VARIANT:-}" ]]; then
   export COREML_PROBE_DECODER_VARIANT="$DECODER_VARIANT"
@@ -321,6 +356,13 @@ keys = [
     "COREML_PROBE_CACHE_POLICY",
     "COREML_PROBE_SEQ_LEN",
     "COREML_PROBE_GENERATE_TOKENS",
+    "COREML_PROBE_DISABLE_SPECULATIVE",
+    "COREML_PROBE_DRAFTER_MODEL",
+    "COREML_PROBE_DRAFTER_COMPUTE",
+    "COREML_PROBE_SPECULATIVE_TREE",
+    "COREML_PROBE_KV_FULL_ANE",
+    "COREML_PROBE_FUSED_COMPUTE",
+    "COREML_PROBE_RETAIN_VERIFY",
     "COREML_PROBE_RETAIN_DECODERS",
     "COREML_PROBE_DECODER_VARIANT",
     "COREML_PROBE_ENDPOINT_VARIANT",
@@ -348,13 +390,22 @@ launch_status=${PIPESTATUS[0]}
 set -e
 
 if [[ "$NO_ANALYZE" != "1" ]]; then
+  analyzer_args=(
+    --require-norm-lm-head
+    --fail-on-repeat
+    --expect-layers "$EXPECTED_LAYERS"
+    --min-generated-tokens "$MIN_GENERATED_TOKENS"
+    --max-peak-mb "$MAX_PEAK_MB"
+  )
+  if [[ "$REQUIRE_SPECULATIVE" == "1" ]]; then
+    analyzer_args+=(--require-speculative)
+  fi
+  if [[ -n "$MIN_SPECULATIVE_TOKENS_PER_SWEEP" ]]; then
+    analyzer_args+=(--min-speculative-tokens-per-sweep "$MIN_SPECULATIVE_TOKENS_PER_SWEEP")
+  fi
   set +e
   "$ROOT_DIR/scripts/analyze_coreml_probe_log.py" "$LAUNCH_LOG" \
-    --require-norm-lm-head \
-    --fail-on-repeat \
-    --expect-layers "$EXPECTED_LAYERS" \
-    --min-generated-tokens "$MIN_GENERATED_TOKENS" \
-    --max-peak-mb "$MAX_PEAK_MB" 2>&1 | tee "$ANALYZE_LOG"
+    "${analyzer_args[@]}" 2>&1 | tee "$ANALYZE_LOG"
   analyze_status=${PIPESTATUS[0]}
   set -e
 else

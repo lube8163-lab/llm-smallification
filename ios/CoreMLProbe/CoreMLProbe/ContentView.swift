@@ -22,7 +22,13 @@ enum AutomationRunKind: String {
     case chat
 
     var usesChat: Bool {
-        self == .chat
+        switch self {
+        case .chat, .imageSmoke, .audioSmoke:
+            true
+        case .probe, .speedSweep, .stabilitySweep, .retentionSweep,
+                .multimodalSmoke, .memoryRamp:
+            false
+        }
     }
 
     static func parse(_ rawValue: String?) -> AutomationRunKind? {
@@ -358,6 +364,12 @@ struct ChatScreen: View {
             List {
                 Section("Generation") {
                     LabeledContent("Mode", value: ProbeRunMode.generateTokenLoop.title)
+                    LabeledContent(
+                        "Speculative",
+                        value: ProbeRunner.speculativeChatAvailable
+                            ? "MTP verify ×\(ProbeRunner.speculativeVerifyLength)"
+                            : "Off (assets missing)"
+                    )
 
                     Picker("Endpoints", selection: $viewModel.endpointComputeSelection) {
                         ForEach(ProbeComputeSelection.endpointCases) { selection in
@@ -765,6 +777,12 @@ struct ProbeScreen: View {
                             .autocorrectionDisabled()
                     }
                     if viewModel.runMode.usesGeneratedTokenCount {
+                        LabeledContent(
+                            "Speculative",
+                            value: ProbeRunner.speculativeChatAvailable
+                                ? "MTP verify ×\(ProbeRunner.speculativeVerifyLength)"
+                                : "Off (assets missing)"
+                        )
                         Stepper(value: $viewModel.generatedTokenCount, in: 1...ProbeRunner.maxGeneratedTokenCount) {
                             LabeledContent("Tokens", value: "\(viewModel.generatedTokenCount)")
                         }
@@ -895,17 +913,26 @@ struct ProbeRunStatistics {
         )
         decoderLoadAverageSeconds = Self.averageDuration(
             in: steps,
-            matching: { $0.name.hasPrefix("Load gemma4_12b_layers") && $0.name.contains("_decoder_") },
+            matching: {
+                $0.name.hasPrefix("Load gemma4_12b_layer")
+                    && ($0.name.contains("_decoder_")
+                        || $0.name.contains("_decode_")
+                        || $0.name.contains("_verify_"))
+            },
             divisor: tokenTotals.count
         )
         decoderPredictAverageSeconds = Self.averageDuration(
             in: steps,
-            matching: { $0.name.hasPrefix("Decoder layer ") },
+            matching: {
+                $0.name.hasPrefix("Decoder layer ")
+                    || $0.name.hasPrefix("KV decode layer ")
+                    || $0.name.hasPrefix("KV verify layer ")
+            },
             divisor: tokenTotals.count
         )
         lmHeadAverageSeconds = Self.averageDuration(
             in: steps,
-            matching: { $0.name.hasPrefix("LM head token ") },
+            matching: { $0.name.contains("LM head") && !$0.name.hasPrefix("Load ") },
             divisor: tokenTotals.count
         )
     }
@@ -1494,11 +1521,19 @@ final class ChatViewModel: ObservableObject {
 
     func configureControlServerFromEnvironment() {
         let environment = ProcessInfo.processInfo.environment
-        guard Self.boolValue(environment["COREML_PROBE_ENABLE_API"]) else { return }
-        let configuredToken = environment["COREML_PROBE_API_TOKEN"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let info = Bundle.main.infoDictionary ?? [:]
+        let bundleAutomationEnabled = Self.boolValue(info["CoreMLProbeAutomationAPIEnabled"])
+        guard Self.boolValue(environment["COREML_PROBE_ENABLE_API"]) || bundleAutomationEnabled else { return }
+        let configuredToken = (
+            environment["COREML_PROBE_API_TOKEN"]
+                ?? info["CoreMLProbeAutomationAPIToken"] as? String
+        )?.trimmingCharacters(in: .whitespacesAndNewlines)
         let token = configuredToken.flatMap { $0.count >= 16 ? $0 : nil } ?? Self.makeSessionToken()
         let diagnostics = Self.diagnosticsAvailable
-            && Self.boolValue(environment["COREML_PROBE_API_DIAGNOSTICS"])
+            && (
+                Self.boolValue(environment["COREML_PROBE_API_DIAGNOSTICS"])
+                    || Self.boolValue(info["CoreMLProbeAutomationAPIDiagnostics"])
+            )
         startControlServer(token: token, diagnosticsEnabled: diagnostics)
     }
 
@@ -1576,6 +1611,13 @@ final class ChatViewModel: ObservableObject {
         }
     }
 
+    private static func boolValue(_ rawValue: Any?) -> Bool {
+        if let value = rawValue as? Bool {
+            return value
+        }
+        return boolValue(rawValue as? String)
+    }
+
     var recentSteps: [ProbeStep] {
         Array(steps.suffix(16))
     }
@@ -1587,11 +1629,13 @@ final class ChatViewModel: ObservableObject {
     }
 
     private static func selectedGeneratedTokenPresetFromProcess() -> Int {
-        let selected = ProbeRunner.selectedGeneratedTokenCountFromProcess(default: ProbeRunner.autoGeneratedTokenCount)
-        guard generatedTokenPresets.contains(selected) else {
-            return ProbeRunner.autoGeneratedTokenCount
-        }
-        return selected
+        // Automation commonly requests a short count (for example 8) that is
+        // intentionally absent from the human-facing segmented presets. Keep
+        // that valid process override instead of silently changing it to the
+        // automatic/EOS-limited mode.
+        ProbeRunner.selectedGeneratedTokenCountFromProcess(
+            default: ProbeRunner.autoGeneratedTokenCount
+        )
     }
 
     func clear() {
@@ -1609,10 +1653,30 @@ final class ChatViewModel: ObservableObject {
     }
 
     func runIfRequested(_ config: AutomationConfig) {
-        guard config.runKind == .chat, !didAutoRun else { return }
+        guard let runKind = config.runKind, runKind.usesChat, !didAutoRun else { return }
         didAutoRun = true
         messageText = config.chatPrompt
-        print("[CoreMLProbe] automation requested kind=\(config.runKind?.rawValue ?? "-") auto_exit=\(config.autoExit)")
+        do {
+            switch runKind {
+            case .chat:
+                break
+            case .imageSmoke:
+                attachedImage = Self.makeAutomationImageFixture()
+            case .audioSmoke:
+                attachedAudioFeatures = try Self.makeAutomationAudioFixture()
+            case .probe, .speedSweep, .stabilitySweep, .retentionSweep,
+                    .multimodalSmoke, .memoryRamp:
+                return
+            }
+        } catch {
+            AutomationExit.completeIfRequested(
+                config,
+                success: false,
+                summary: "automation fixture failed: \(error)"
+            )
+            return
+        }
+        print("[CoreMLProbe] automation requested kind=\(runKind.rawValue) auto_exit=\(config.autoExit)")
         send { success, summary in
             AutomationExit.completeIfRequested(config, success: success, summary: summary)
         }
@@ -1904,11 +1968,17 @@ final class ChatViewModel: ObservableObject {
             completion?(false, "tokenizer unavailable")
             return
         }
+        // Match text and image chat: when the KV prefill/decode assets are
+        // bundled, use Seq320 so audio also benefits from speculative decode
+        // and optional fused KV groups. The old Seq64 path remains a fallback
+        // for the small legacy audio-only app.
+        let audioSequenceLength: ProbeSequenceLength =
+            ProbeRunner.kvChatAvailable ? .seq320 : sequenceLength
         let window: (ids: [Int32], audioStart: Int)
         do {
             window = try tokenizer.encodeChatWindowWithAudio(
                 prompt: text,
-                sequenceLength: sequenceLength,
+                sequenceLength: audioSequenceLength,
                 audioTokenCount: ProbeRunner.audioTokenCount
             )
         } catch {
@@ -1924,7 +1994,7 @@ final class ChatViewModel: ObservableObject {
         let computePlan = ProbeComputePlan(endpoint: endpointComputeSelection, decoder: decoderComputeSelection)
         let layerSelection = layerSelection
         let cacheClearPolicy = cacheClearPolicy
-        let sequenceLength = self.sequenceLength
+        let sequenceLength = audioSequenceLength
 
         messageText = ""
         attachedAudioFeatures = nil
@@ -2008,6 +2078,42 @@ final class ChatViewModel: ObservableObject {
         generationPhase = ""
             completion?(success, completionSummary)
         }
+    }
+
+    /// Deterministic colored fixture used by device automation. It goes
+    /// through the same UIImage rasterization and 256-patch embedder path as
+    /// a photo selected by the user.
+    private static func makeAutomationImageFixture() -> UIImage {
+        let size = CGSize(width: 192, height: 192)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { _ in
+            UIColor.systemBlue.setFill()
+            UIRectFill(CGRect(origin: .zero, size: size))
+            UIColor.systemYellow.setFill()
+            UIRectFill(CGRect(x: 24, y: 24, width: 72, height: 72))
+            UIColor.systemRed.setFill()
+            UIRectFill(CGRect(x: 96, y: 96, width: 72, height: 72))
+        }
+    }
+
+    /// Deterministic non-zero feature fixture for the audio embedder. The
+    /// shape and value range match the regular audio attachment contract.
+    private static func makeAutomationAudioFixture() throws -> MLMultiArray {
+        let tokenCount = ProbeRunner.audioTokenCount
+        let featureDim = ProbeRunner.audioFeatureDim
+        let array = try MLMultiArray(
+            shape: [1, NSNumber(value: tokenCount), NSNumber(value: featureDim)],
+            dataType: .float32
+        )
+        let pointer = array.dataPointer.bindMemory(to: Float.self, capacity: array.count)
+        for token in 0..<tokenCount {
+            let envelope = Float(token + 1) / Float(max(tokenCount, 1))
+            for feature in 0..<featureDim {
+                let phase = Float((token * 31 + feature * 17) % 257) / 256.0
+                pointer[token * featureDim + feature] = (phase - 0.5) * envelope
+            }
+        }
+        return array
     }
 
     /// Human-readable "N tok · Ts · X tok/s" for the chat footer.

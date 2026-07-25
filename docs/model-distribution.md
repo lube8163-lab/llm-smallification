@@ -39,6 +39,32 @@ Large model families should be separated into logical groups such as endpoint,
 prefill, decode, multimodal embedders, and optional MTP drafter assets. This
 lets users download only the path they intend to run.
 
+## Published layout
+
+```text
+models/
+  endpoints/               embedding and norm/lm_head
+  kv/
+    prefill/               48 single-layer Seq320 packages
+    decode/                48 single-layer seq=1 packages
+  multimodal/              image and audio embedders
+  speculative/
+    drafter/               mixed pal4-body/int8-head MTP step
+    verify/                48 single-layer seq=4 packages
+  fused/
+    kv/                    selected layers00...05 prefill/verify pair
+```
+
+The default `practical` download profile excludes `speculative/` and `fused/`
+to keep the original chat setup smaller. Set `HF_MODEL_PROFILE=speculative`
+to download, verify, compile, and stage every published package.
+
+Only the measured-useful first six-layer fusion is distributed. The second
+group (layers 06...11) made the same 24-token iPhone 17 run 5.4% slower and
+increased peak memory, so it remains a local conversion experiment. Compiled
+`.mlmodelc` bundles, device logs, Core ML execution-plan caches, and the
+superseded reversed-input MTP drafter are never published.
+
 ## License and notices
 
 Gemma 4 is published under Apache License 2.0. A repository containing converted
@@ -57,9 +83,10 @@ repository carries the upstream model license and conversion notices.
 
 ## Publication sequence
 
-1. Create the Hugging Face model repository as private.
-2. Upload one minimal, checksum-verified asset group through Xet.
-3. Test a clean download, compile, import, and device run.
-4. Complete the model card and license/notice files.
-5. Decide whether access should be public or gated.
-6. Only then add the model repository URL to the GitHub README and article.
+1. Validate package count, names, model interfaces, and selected source paths.
+2. Rebuild the repository-wide `SHA256SUMS` without removing existing entries.
+3. Upload portable `.mlpackage` sources and model-card metadata through Xet.
+4. Test a clean profile download, checksum verification, compilation, and
+   app staging.
+5. Record the matching conversion-code commit and device result.
+6. Do not publish slower, incorrect, compiled, or device-specific artifacts.

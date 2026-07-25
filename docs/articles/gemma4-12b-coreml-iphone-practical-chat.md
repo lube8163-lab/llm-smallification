@@ -215,3 +215,10 @@ A100 で HF の assisted generation を測ると、greedy で GPU speedup 1.71 �
 - 前回記事：[Gemma 4 12B Unified を Core ML 化して低メモリ iPhone でマルチモーダル経路だけ通す](https://zenn.dev/lube8163/articles/89d24e671d1eaa)
 - [Gemma 4 Multi-Token Prediction (MTP) — Google AI for Developers](https://ai.google.dev/gemma/docs/mtp/overview)
 - [google/gemma-4-12B-it-assistant（MTP ドラフタ）](https://huggingface.co/google/gemma-4-12B-it-assistant)
+
+:::message
+その後、MTP投機デコード、iPhone世代別の実行先、6層融合モデルまで実装・実機検証しました。
+続編の原稿は
+[`gemma4-12b-coreml-iphone-speculative-decoding.md`](./gemma4-12b-coreml-iphone-speculative-decoding.md)
+にまとめています。
+:::

@@ -1,25 +1,29 @@
 #!/usr/bin/env python3
 """Convert Gemma 4 decoder layers to KV-cache Core ML packages.
 
-Two fixed-shape graphs per layer, sharing the same palettized weights:
+Fixed-shape graphs per layer, sharing the same palettized weights:
 
   prefill (seq=S_PREFILL): x [1,S,3840] + causal/image mask [1,1,S,S]
       -> y [1,S,3840], k/v [1,8,S,256]  (post-RoPE, ready to cache)
-  decode  (seq=1, cache=S_MAX): x [1,1,3840], mask [1,1,1,S_MAX+1],
-      k_cache/v_cache [1,8,S_MAX,256]
-      -> y [1,1,3840], k_new/v_new [1,8,1,256]
+  decode/verify (seq=Q, cache=S_MAX): x [1,Q,3840],
+      mask [1,1,Q,S_MAX+Q], k_cache/v_cache [1,8,S_MAX,256]
+      -> y [1,Q,3840], k_new/v_new [1,8,Q,256]
+
+Q=1 emits the normal autoregressive decode bundle. Q>1 emits a speculative
+verify bundle. The app passes [current token, draft_1, ..., draft_(Q-1)]; the
+Q target logits verify the drafts and provide a correction/bonus token.
 
 The app owns the cache buffers: after prefill it copies k/v into slots
-[0..S), after each decode it writes k_new/v_new at the generation slot.
-Attention inside the decode graph runs over [cache ; new] = S_MAX+1 keys;
-invalid slots are masked by the app with -inf.
+[0..S), then commits the accepted prefix of k_new/v_new at the generation
+slots. Attention runs over [cache ; query] = S_MAX+Q keys; invalid cache slots
+and future query positions are masked by the app with -inf.
 
-Constraint: S_MAX must stay <= sliding_window (1024) so sliding and full
+Constraint: S_MAX+Q must stay <= sliding_window (1024) so sliding and full
 attention layers share the same mask semantics. num_kv_shared_layers is 0
 for this checkpoint (verified), so every layer computes its own KV.
 
 Validation (--validate, default on): for one sliding and one full layer,
-prefill(4)+decode(4) must match the cache-free forward over seq 8.
+prefill(4)+decode(Q) must match the cache-free forward over seq 4+Q.
 """
 
 from __future__ import annotations
@@ -137,6 +141,27 @@ def causal_mask(seq, dtype, device):
     return mask
 
 
+def cached_causal_mask(*, query_len, cache_len, written, dtype, device):
+    """Mask [cache ; query] with a causal query tail.
+
+    Only cache slots [0, written) are visible. Query row r sees query columns
+    [0, r], which lets one target pass verify Q-1 speculative candidates and
+    produce one correction/bonus token.
+    """
+    if not 0 <= written <= cache_len:
+        raise ValueError(f"written must be within 0...{cache_len}, got {written}")
+    mask = torch.full(
+        (1, 1, query_len, cache_len + query_len),
+        -65504.0,
+        dtype=dtype,
+        device=device,
+    )
+    mask[..., :written] = 0.0
+    for row in range(query_len):
+        mask[..., row, cache_len : cache_len + row + 1] = 0.0
+    return mask
+
+
 def layer_kv_shape(language_model, layer_idx):
     """KV cache geometry differs by layer type: sliding layers are GQA
     (8 heads x 256), full-attention layers are MQA with K=V projection
@@ -148,9 +173,10 @@ def layer_kv_shape(language_model, layer_idx):
 
 
 @torch.inference_mode()
-def validate_layer(language_model, layer_idx, dtype, device):
+def validate_layer(language_model, layer_idx, dtype, device, decode_seq):
     hidden = language_model.config.hidden_size
-    seq, prefill_len = 8, 4
+    prefill_len = 4
+    seq = prefill_len + decode_seq
     x = (torch.randn(1, seq, hidden, device=device, dtype=dtype) * 0.5)
     pos = torch.arange(seq, device=device, dtype=torch.int32).unsqueeze(0)
 
@@ -172,27 +198,26 @@ def validate_layer(language_model, layer_idx, dtype, device):
     v_cache[:, :, :prefill_len] = v_blk
 
     max_err = (y_pre - y_ref[:, :prefill_len]).abs().max().item()
-    written = prefill_len
-    for step in range(prefill_len, seq):
-        mask = torch.full((1, 1, 1, s_max + 1), -65504.0, device=device, dtype=dtype)
-        mask[..., :written] = 0.0
-        mask[..., -1] = 0.0  # the new token itself
-        y_step, k_new, v_new = decode(
-            x[:, step : step + 1],
-            pos[:, step : step + 1],
-            mask,
-            k_cache,
-            v_cache,
-        )
-        k_cache[:, :, written] = k_new[:, :, 0]
-        v_cache[:, :, written] = v_new[:, :, 0]
-        written += 1
-        max_err = max(max_err, (y_step - y_ref[:, step : step + 1]).abs().max().item())
+    mask = cached_causal_mask(
+        query_len=decode_seq,
+        cache_len=s_max,
+        written=prefill_len,
+        dtype=dtype,
+        device=device,
+    )
+    y_step, _, _ = decode(
+        x[:, prefill_len:],
+        pos[:, prefill_len:],
+        mask,
+        k_cache,
+        v_cache,
+    )
+    max_err = max(max_err, (y_step - y_ref[:, prefill_len:]).abs().max().item())
 
     scale = y_ref.abs().max().item()
     rel = max_err / max(scale, 1e-6)
-    print(f"validate layer{layer_idx:02d} type={prefill.layer_type} maxAbsErr={max_err:.5f} "
-          f"refMax={scale:.2f} rel={rel:.5f}", flush=True)
+    print(f"validate layer{layer_idx:02d} type={prefill.layer_type} decode_seq={decode_seq} "
+          f"maxAbsErr={max_err:.5f} refMax={scale:.2f} rel={rel:.5f}", flush=True)
     if rel > 5e-3:
         raise SystemExit(f"validation failed for layer {layer_idx}: rel {rel}")
 
@@ -244,12 +269,21 @@ def main():
     parser.add_argument("--layers", default="all")
     parser.add_argument("--prefill-seq", type=int, default=320)
     parser.add_argument("--s-max", type=int, default=512)
+    parser.add_argument(
+        "--decode-seq",
+        type=int,
+        default=1,
+        help="query width; 1 creates normal decode bundles, >1 speculative verify bundles",
+    )
     parser.add_argument("--group-size", type=int, default=16)
     parser.add_argument("--target", choices=["all", "prefill", "decode"], default="all")
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--skip-validate", action="store_true")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
+
+    if args.decode_seq < 1:
+        parser.error("--decode-seq must be at least 1")
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -263,7 +297,9 @@ def main():
     language_model = model.model.language_model
     config = language_model.config
     assert getattr(config, "num_kv_shared_layers", 0) == 0, "KV-shared layers not supported"
-    assert args.s_max <= config.sliding_window, "S_MAX must stay within the sliding window"
+    assert args.s_max + args.decode_seq <= config.sliding_window, (
+        "S_MAX + decode_seq must stay within the sliding window"
+    )
     print("loaded_sec", round(time.time() - t0, 2), flush=True)
 
     device, dtype = "cuda", torch.float16
@@ -271,8 +307,8 @@ def main():
 
     # Validate one sliding layer and one full-attention layer.
     full_idx = next(i for i, t in enumerate(config.layer_types) if t == "full_attention")
-    validate_layer(language_model, 0, dtype, device)
-    validate_layer(language_model, full_idx, dtype, device)
+    validate_layer(language_model, 0, dtype, device, args.decode_seq)
+    validate_layer(language_model, full_idx, dtype, device, args.decode_seq)
     if args.validate_only:
         print("validation ok", flush=True)
         return
@@ -289,7 +325,7 @@ def main():
         else [int(part) for part in args.layers.split(",")]
     )
 
-    s_pre, s_max = args.prefill_seq, args.s_max
+    s_pre, s_max, s_decode = args.prefill_seq, args.s_max, args.decode_seq
     for layer_idx in layer_indices:
         if args.target in {"all", "prefill"}:
             x = torch.randn(1, s_pre, hidden, device=device, dtype=dtype) * 0.1
@@ -309,13 +345,28 @@ def main():
             )
         if args.target in {"all", "decode"}:
             kv_heads, head_dim = layer_kv_shape(language_model, layer_idx)
-            x1 = torch.randn(1, 1, hidden, device=device, dtype=dtype) * 0.1
-            pos1 = torch.tensor([[s_pre]], device=device, dtype=torch.int32)
-            mask1 = torch.zeros(1, 1, 1, s_max + 1, device=device, dtype=dtype)
+            x1 = torch.randn(1, s_decode, hidden, device=device, dtype=dtype) * 0.1
+            pos1 = torch.arange(
+                s_pre, s_pre + s_decode, device=device, dtype=torch.int32
+            ).unsqueeze(0)
+            mask1 = cached_causal_mask(
+                query_len=s_decode,
+                cache_len=s_max,
+                written=s_pre,
+                dtype=dtype,
+                device=device,
+            )
             kc = torch.randn(1, kv_heads, s_max, head_dim, device=device, dtype=dtype) * 0.1
             vc = torch.randn_like(kc) * 0.1
+            if s_decode == 1:
+                decode_name = f"gemma4_12b_layer{layer_idx:02d}_decode_kv{s_max}_pal4_g{args.group_size}"
+            else:
+                decode_name = (
+                    f"gemma4_12b_layer{layer_idx:02d}_verify_seq{s_decode}_"
+                    f"kv{s_max}_pal4_g{args.group_size}"
+                )
             convert_one(
-                name=f"gemma4_12b_layer{layer_idx:02d}_decode_kv{s_max}_pal4_g{args.group_size}",
+                name=decode_name,
                 wrapper=DecodeLayerWrapper(language_model, layer_idx),
                 example_inputs=(x1, pos1, mask1, kc, vc),
                 input_types=[

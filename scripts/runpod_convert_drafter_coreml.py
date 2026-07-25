@@ -4,9 +4,9 @@
 One autoregressive draft step (seq=1) that cross-attends to the backbone's KV
 cache (which CoreMLProbe already holds as layer46 sliding + layer47 full):
 
-  inputs: backbone_hidden [1,1,3840], token_emb [1,1,3840],
+  inputs: token_emb [1,1,3840], backbone_hidden [1,1,3840],
           sliding_k/v [1,8,S,256], full_k/v [1,1,S,512],
-          position_ids [1,1], attention_mask [1,S]
+          position_ids [1,1], attention_mask [1,1,1,S]
   outputs: logits [1,1,262144], projected_hidden [1,1,3840]
 
 Chained on device: projected_hidden feeds the next step's backbone_hidden.
@@ -63,7 +63,10 @@ class DraftStepWrapper(torch.nn.Module):
         self.lm_head = model.lm_head
 
     def forward(self, backbone_hidden, token_emb, sliding_k, sliding_v, full_k, full_v, position_ids, attention_mask):
-        inputs_embeds = self.pre_projection(torch.cat([backbone_hidden, token_emb], dim=-1))
+        # Gemma4AssistantCandidateGenerator concatenates these in this exact
+        # order. Reversing the two equally-sized inputs still converts and
+        # predicts, but destroys drafter acceptance on real target states.
+        inputs_embeds = self.pre_projection(torch.cat([token_emb, backbone_hidden], dim=-1))
         shared_kv = {
             "sliding_attention": (sliding_k, sliding_v),
             "full_attention": (full_k, full_v),
@@ -83,7 +86,17 @@ class DraftStepWrapper(torch.nn.Module):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--out-dir", default="/workspace/gemma12b/coreml-drafter")
+    parser.add_argument("--drafter", default=DRAFTER)
     parser.add_argument("--group-size", type=int, default=16)
+    parser.add_argument(
+        "--quantization",
+        choices=["fp16", "pal4", "mixed"],
+        default="mixed",
+        help=(
+            "mixed keeps the drafter body pal4 and uses int8 for the sensitive "
+            "262k-vocabulary head"
+        ),
+    )
     parser.add_argument("--keep-fp16", action="store_true")
     args = parser.parse_args()
 
@@ -93,7 +106,7 @@ def main():
     dt = torch.float32
     print("loading drafter", flush=True)
     model = Gemma4UnifiedAssistantForCausalLM.from_pretrained(
-        DRAFTER, dtype=dt, low_cpu_mem_usage=True
+        args.drafter, dtype=dt, low_cpu_mem_usage=True
     ).eval()
     tc = model.config.get_text_config()
     H = model.config.backbone_hidden_size
@@ -116,6 +129,22 @@ def main():
 
     with torch.inference_mode():
         ref_logits, ref_hidden = wrapper(*example)
+        official = model(
+            inputs_embeds=torch.cat([ex["token_emb"], ex["backbone_hidden"]], dim=-1),
+            attention_mask=torch.ones(1, S, dtype=dt),
+            position_ids=ex["position_ids"],
+            shared_kv_states={
+                "sliding_attention": (ex["sliding_k"], ex["sliding_v"]),
+                "full_attention": (ex["full_k"], ex["full_v"]),
+            },
+            use_cache=False,
+        )
+        # The wrapper uses finite fp16-min for masked slots while the eager HF
+        # helper starts from float32-min. Both exclude the same keys; allow the
+        # resulting sub-millilogit rounding difference.
+        torch.testing.assert_close(ref_logits, official.logits, rtol=1e-3, atol=2e-4)
+        torch.testing.assert_close(ref_hidden, official.last_hidden_state, rtol=1e-3, atol=2e-4)
+        print("official candidate-generator input order validated", flush=True)
         print("forward ok logits", tuple(ref_logits.shape), "hidden", tuple(ref_hidden.shape), flush=True)
         traced = torch.jit.trace(wrapper, example, strict=False)
     print("trace ok", flush=True)
@@ -151,24 +180,18 @@ def main():
         "position_ids": ex["position_ids"].numpy().astype(np.int32),
         "attention_mask": np16(ex["attention_mask"]),
     }
-    try:
-        pred = mlmodel.predict(feed)
+    def validate_coreml(candidate, label):
+        pred = candidate.predict(feed)
         ml_logits = np.asarray(pred["logits"]).reshape(-1)
         hf_logits = ref_logits.detach().numpy().reshape(-1).astype(np.float32)
         ml_arg = int(np.argmax(ml_logits)); hf_arg = int(np.argmax(hf_logits))
-        print(f"argmax match: coreml #{ml_arg} vs hf #{hf_arg} -> {ml_arg == hf_arg}", flush=True)
-        print(f"logit maxabs diff (top region): {np.max(np.abs(ml_logits.astype(np.float32) - hf_logits)):.4f}", flush=True)
+        print(f"{label} argmax: coreml #{ml_arg} vs hf #{hf_arg} -> {ml_arg == hf_arg}", flush=True)
+        print(f"{label} logit maxabs diff: {np.max(np.abs(ml_logits.astype(np.float32) - hf_logits)):.4f}", flush=True)
+
+    try:
+        validate_coreml(mlmodel, "fp16")
     except Exception as e:
         print("predict skipped (Linux CoreML runtime):", str(e)[:120], flush=True)
-
-    if args.keep_fp16:
-        mlmodel.save(f"{args.out_dir}/gemma4_12b_drafter_step_kv{S}_fp16.mlpackage")
-
-    cfg = cto.OptimizationConfig(global_config=cto.OpPalettizerConfig(
-        nbits=4, mode="kmeans", granularity="per_grouped_channel", group_size=args.group_size))
-    q = cto.palettize_weights(mlmodel, config=cfg)
-    out_path = f"{args.out_dir}/gemma4_12b_drafter_step_kv{S}_pal4_g{args.group_size}.mlpackage"
-    q.save(out_path)
 
     def size(p):
         tot = 0
@@ -176,7 +199,69 @@ def main():
             for f in fs:
                 tot += os.path.getsize(os.path.join(r, f))
         return tot
-    print("saved", out_path, "mib", round(size(out_path) / 1024**2, 2), flush=True)
+
+    fp16_path = f"{args.out_dir}/gemma4_12b_drafter_step_kv{S}_fp16.mlpackage"
+    if args.keep_fp16 or args.quantization == "fp16":
+        mlmodel.save(fp16_path)
+        print("saved", fp16_path, "mib", round(size(fp16_path) / 1024**2, 2), flush=True)
+
+    if args.quantization == "pal4":
+        cfg = cto.OptimizationConfig(global_config=cto.OpPalettizerConfig(
+            nbits=4, mode="kmeans", granularity="per_grouped_channel", group_size=args.group_size))
+        output_model = cto.palettize_weights(mlmodel, config=cfg)
+        out_path = f"{args.out_dir}/gemma4_12b_drafter_step_kv{S}_pal4_g{args.group_size}.mlpackage"
+    elif args.quantization == "mixed":
+        metadata = cto.get_weights_metadata(mlmodel, weight_threshold=2048)
+        if not metadata:
+            raise RuntimeError("could not inspect drafter weights for mixed compression")
+        # The assistant lm_head is 262144x1024 and is by far the largest
+        # tensor. Pal4 changed its argmax in the first conversion experiment,
+        # so exclude it from palettization and quantize that tensor to int8 in
+        # a second pass. This keeps the package much smaller than fp16 without
+        # applying the known-lossy 4-bit treatment to the vocabulary head.
+        head_weight_name, head_metadata = max(
+            metadata.items(), key=lambda item: item[1].val.size
+        )
+        print(
+            "mixed compression head",
+            head_weight_name,
+            "shape",
+            head_metadata.val.shape,
+            flush=True,
+        )
+        body_cfg = cto.OptimizationConfig(
+            global_config=cto.OpPalettizerConfig(
+                nbits=4,
+                mode="kmeans",
+                granularity="per_grouped_channel",
+                group_size=args.group_size,
+            ),
+            op_name_configs={head_weight_name: None},
+        )
+        body_pal4 = cto.palettize_weights(mlmodel, config=body_cfg)
+        head_cfg = cto.OptimizationConfig(
+            op_name_configs={
+                head_weight_name: cto.OpLinearQuantizerConfig(
+                    mode="linear_symmetric", weight_threshold=0
+                )
+            }
+        )
+        output_model = cto.linear_quantize_weights(body_pal4, config=head_cfg)
+        out_path = (
+            f"{args.out_dir}/gemma4_12b_drafter_step_kv{S}_"
+            f"mixed_pal4_g{args.group_size}_head_int8.mlpackage"
+        )
+    else:
+        output_model = None
+        out_path = fp16_path
+
+    if output_model is not None:
+        try:
+            validate_coreml(output_model, args.quantization)
+        except Exception as e:
+            print("compressed predict skipped:", str(e)[:120], flush=True)
+        output_model.save(out_path)
+        print("saved", out_path, "mib", round(size(out_path) / 1024**2, 2), flush=True)
     print("done", flush=True)
 
 

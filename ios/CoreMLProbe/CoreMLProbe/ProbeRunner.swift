@@ -58,6 +58,14 @@ enum ProbeComputeSelection: String, CaseIterable, Identifiable {
         )
     }
 
+    static func selectedDrafterFromProcess(default fallback: ProbeComputeSelection) -> ProbeComputeSelection {
+        selectedFromProcess(
+            environmentKey: "COREML_PROBE_DRAFTER_COMPUTE",
+            argumentPrefix: "--drafter-compute=",
+            default: fallback
+        )
+    }
+
     private static func selectedFromProcess(
         environmentKey: String,
         argumentPrefix: String,
@@ -736,6 +744,21 @@ enum ProbeRunner {
               let count = Int(rawValue),
               (defaultRetainedDecoderModelCount...maxRetainedDecoderModelCount).contains(count) else {
             return recommendedRetainedDecoderModelCount
+        }
+        return count
+    }
+
+    static func selectedRetainedVerifyModelCountFromProcess(default fallback: Int = 0) -> Int {
+        let environment = ProcessInfo.processInfo.environment
+        let prefix = "--retain-verify="
+        let rawValue = environment["COREML_PROBE_RETAIN_VERIFY"]
+            ?? ProcessInfo.processInfo.arguments
+                .first(where: { $0.hasPrefix(prefix) })
+                .map { String($0.dropFirst(prefix.count)) }
+        guard let rawValue,
+              let count = Int(rawValue),
+              (0...maxRetainedDecoderModelCount).contains(count) else {
+            return fallback
         }
         return count
     }
@@ -1499,7 +1522,7 @@ enum ProbeRunner {
                     )
                     if overlaid > 0 {
                         recordStep(
-                            "Image hidden overlay \(step)",
+                            "Multimodal hidden overlay \(step)",
                             detail: "patches=\(overlaid) windowStart=\(imageWindowStart)",
                             steps: &steps
                         )
@@ -1688,7 +1711,7 @@ enum ProbeRunner {
                 ]),
                 steps: &steps
             )
-            return try requireArray(named: "image_hidden", output: output)
+            return try float16Copy(of: requireArray(named: "image_hidden", output: output))
         }
         recordStep("Released \(imageEmbedderName)", detail: "image_hidden retained", steps: &steps)
         if cacheClearPolicy.clearsAfterNonDecoderRelease {
@@ -1764,7 +1787,7 @@ enum ProbeRunner {
                 ]),
                 steps: &steps
             )
-            return try requireArray(named: "audio_hidden", output: output)
+            return try float16Copy(of: requireArray(named: "audio_hidden", output: output))
         }
         recordStep("Released \(audioEmbedderName)", detail: "audio_hidden retained", steps: &steps)
         if cacheClearPolicy.clearsAfterNonDecoderRelease {
@@ -2218,17 +2241,132 @@ enum ProbeRunner {
         String(format: "gemma4_12b_layer%02d_decode_kv%d_pal4_g16", layer, kvCacheCapacity)
     }
 
-    /// The full-attention decode layers (MQA 1x512 with a 513-key concat) fail
-    /// the ANE execution-plan build intermittently (error -5, ~1.4GB compile
-    /// spike). Their pal4 weights still run fine on CPU+GPU, so route just those
-    /// 8 layers off the ANE; the 40 sliding-attention decode layers stay on ANE.
-    /// `COREML_PROBE_KV_FULL_ANE=1` forces them back for A/B.
-    private static let kvFullLayerForcesANE: Bool =
-        ProcessInfo.processInfo.environment["COREML_PROBE_KV_FULL_ANE"] == "1"
+    /// A verify width of four consumes [current, draft1, draft2, draft3]. The
+    /// target logits then verify the three drafts and provide one correction or
+    /// bonus token, so a single 48-layer load sweep advances 1...4 tokens.
+    static let speculativeVerifyLength = 4
+
+    private static func kvVerifyName(layer: Int) -> String {
+        String(
+            format: "gemma4_12b_layer%02d_verify_seq%d_kv%d_pal4_g16",
+            layer,
+            speculativeVerifyLength,
+            kvCacheCapacity
+        )
+    }
+
+    private static let fusedKVLayerCount = 6
+
+    private static func fusedKVPrefillName(layerStart: Int) -> String {
+        String(
+            format: "gemma4_12b_layers%02d_%02d_prefill_seq%d_kv_pal4_g16",
+            layerStart,
+            layerStart + fusedKVLayerCount - 1,
+            kvPrefillLength
+        )
+    }
+
+    private static func fusedKVVerifyName(layerStart: Int) -> String {
+        String(
+            format: "gemma4_12b_layers%02d_%02d_verify_seq%d_kv%d_pal4_g16",
+            layerStart,
+            layerStart + fusedKVLayerCount - 1,
+            speculativeVerifyLength,
+            kvCacheCapacity
+        )
+    }
+
+    private static func fusedKVOutputName(
+        prefix: String,
+        layer: Int
+    ) -> String {
+        String(format: "%@_%02d", prefix, layer)
+    }
+
+    private static var fusedKVPrefillStackAvailable: Bool {
+        stride(from: 0, to: 48, by: fusedKVLayerCount).allSatisfy {
+            ProbeSequenceLength.modelExists(named: fusedKVPrefillName(layerStart: $0))
+        }
+    }
+
+    private static var fusedKVVerifyStackAvailable: Bool {
+        stride(from: 0, to: 48, by: fusedKVLayerCount).allSatisfy {
+            ProbeSequenceLength.modelExists(named: fusedKVVerifyName(layerStart: $0))
+        }
+    }
+
+    private static var singleKVVerifyStackAvailable: Bool {
+        (0..<48).allSatisfy {
+            ProbeSequenceLength.modelExists(named: kvVerifyName(layer: $0))
+        }
+    }
+
+    private static var speculativeDrafterName: String? {
+        let environment = ProcessInfo.processInfo.environment
+        if environment["COREML_PROBE_DISABLE_SPECULATIVE"] == "1" { return nil }
+
+        let argumentPrefix = "--drafter-model="
+        let override = environment["COREML_PROBE_DRAFTER_MODEL"]
+            ?? ProcessInfo.processInfo.arguments
+                .first(where: { $0.hasPrefix(argumentPrefix) })
+                .map { String($0.dropFirst(argumentPrefix.count)) }
+        if let override, !override.isEmpty {
+            return ProbeSequenceLength.modelExists(named: override) ? override : nil
+        }
+
+        // Only auto-select the mixed build verified against the target. The
+        // currently archived fp16 asset is shape-compatible but produced
+        // divergent IDs on device; it remains available solely via the
+        // explicit COREML_PROBE_DRAFTER_MODEL diagnostic override.
+        let candidates = [
+            "gemma4_12b_drafter_step_kv512_mixed_pal4_g16_head_int8"
+        ]
+        return candidates.first(where: ProbeSequenceLength.modelExists(named:))
+    }
+
+    /// After repeated top-1 misses, use the existing four-row verifier as a
+    /// one-level draft tree: [current, candidate1, candidate2, candidate3].
+    /// The target still chooses every emitted token, so greedy output remains
+    /// identical. Set COREML_PROBE_SPECULATIVE_TREE=0 for linear-chain A/B.
+    private static let speculativeAdaptiveTreeEnabled: Bool = {
+        guard let raw = ProcessInfo.processInfo.environment["COREML_PROBE_SPECULATIVE_TREE"] else {
+            return true
+        }
+        return !["0", "false", "no", "off"].contains(raw.lowercased())
+    }()
+
+    static var speculativeChatAvailable: Bool {
+        guard kvChatAvailable, speculativeDrafterName != nil else { return false }
+        return fusedKVVerifyStackAvailable || singleKVVerifyStackAvailable
+    }
+
+    /// A15/iPhone 14 intermittently rejects the full-attention execution plan,
+    /// so it keeps the measured-safe CPU+GPU route. A19/iPhone 17 completed the
+    /// same graph on ANE and was ~20% faster end-to-end with lower memory, so
+    /// newer devices use ANE by default. The environment override keeps both
+    /// directions available for regression A/B (`0` = CPU+GPU, `1` = ANE).
+    private static let kvFullLayersUseANE: Bool = {
+        if let rawValue = ProcessInfo.processInfo.environment["COREML_PROBE_KV_FULL_ANE"] {
+            return ["1", "true", "yes", "on"].contains(rawValue.lowercased())
+        }
+        return deviceMajorVersion >= 18
+    }()
 
     private static func kvDecodeConfig(layer: Int, base: MLModelConfiguration) -> MLModelConfiguration {
-        guard layer % 6 == 5, !kvFullLayerForcesANE else { return base }
+        guard layer % 6 == 5, !kvFullLayersUseANE else { return base }
         return makeConfig(.cpuAndGPU)
+    }
+
+    /// Fused groups contain a full-attention layer, so they need one compute
+    /// policy for the entire six-layer graph. The override is useful when a
+    /// device cannot build the fused ANE execution plan without exceeding its
+    /// per-process disk-write budget.
+    private static func kvFusedConfig(base: MLModelConfiguration) -> MLModelConfiguration {
+        if let rawValue = ProcessInfo.processInfo.environment["COREML_PROBE_FUSED_COMPUTE"],
+           let selection = ProbeComputeSelection(rawValue: rawValue) {
+            return makeConfig(selection)
+        }
+        return kvFullLayersUseANE ? base : makeConfig(.cpuAndGPU)
     }
 
     private static let kvEmbeddingSeq1Name = "gemma4_12b_embedding_seq1_int4_block32"
@@ -2238,12 +2376,20 @@ enum ProbeRunner {
     /// keeps the cache-free path selectable for A/B runs.
     static var kvChatAvailable: Bool {
         if ProcessInfo.processInfo.environment["COREML_PROBE_DISABLE_KV"] == "1" { return false }
-        return ProbeSequenceLength.modelExists(named: kvEmbeddingSeq1Name)
+        let baseAssetsAvailable =
+            ProbeSequenceLength.modelExists(named: kvEmbeddingSeq1Name)
             && ProbeSequenceLength.modelExists(named: ProbeSequenceLength.seq320.embeddingName)
-            && ProbeSequenceLength.modelExists(named: kvPrefillName(layer: 0))
+        let singleLayerStackAvailable =
+            ProbeSequenceLength.modelExists(named: kvPrefillName(layer: 0))
             && ProbeSequenceLength.modelExists(named: kvPrefillName(layer: 47))
             && ProbeSequenceLength.modelExists(named: kvDecodeName(layer: 0))
             && ProbeSequenceLength.modelExists(named: kvDecodeName(layer: 47))
+        let fusedSpeculativeStackAvailable =
+            fusedKVPrefillStackAvailable
+            && fusedKVVerifyStackAvailable
+            && speculativeDrafterName != nil
+        return baseAssetsAvailable
+            && (singleLayerStackAvailable || fusedSpeculativeStackAvailable)
     }
 
     /// Per-layer KV cache geometry. Gemma 4 Unified alternates 5 sliding
@@ -2276,17 +2422,31 @@ enum ProbeRunner {
         }
     }
 
-    /// Copies a prefill K/V block [1,H,block,D] into cache slots [0, block).
-    private static func copyKVBlock(_ block: MLMultiArray, into buffer: MLMultiArray, cache: KVLayerCache) throws {
+    /// Copies a K/V block [1,H,block,D] into cache slots beginning at
+    /// `startSlot`. Verify outputs are written before acceptance is known;
+    /// rejected tail slots remain masked and are overwritten by the next round.
+    private static func copyKVBlock(
+        _ block: MLMultiArray,
+        into buffer: MLMultiArray,
+        cache: KVLayerCache,
+        startSlot: Int = 0
+    ) throws {
         guard block.dataType == .float16, buffer.dataType == .float16 else {
             throw ProbeError.unexpectedShape("KV block dtype \(block.dataType)")
         }
         let blockLength = block.count / (cache.heads * cache.headDim)
+        guard block.count == cache.heads * blockLength * cache.headDim,
+              startSlot >= 0,
+              startSlot + blockLength <= kvCacheCapacity else {
+            throw ProbeError.unexpectedShape(
+                "KV block count=\(block.count) start=\(startSlot) length=\(blockLength) capacity=\(kvCacheCapacity)"
+            )
+        }
         let source = block.dataPointer.bindMemory(to: Float16.self, capacity: block.count)
         let destination = buffer.dataPointer.bindMemory(to: Float16.self, capacity: buffer.count)
         for head in 0..<cache.heads {
             let sourceBase = head * blockLength * cache.headDim
-            let destinationBase = head * kvCacheCapacity * cache.headDim
+            let destinationBase = (head * kvCacheCapacity + startSlot) * cache.headDim
             for index in 0..<(blockLength * cache.headDim) {
                 destination[destinationBase + index] = source[sourceBase + index]
             }
@@ -2306,6 +2466,26 @@ enum ProbeRunner {
         }
     }
 
+    /// Moves an already-written cache row to its canonical contiguous slot.
+    /// Tree verification writes sibling candidates into separate rows; after
+    /// the target selects a branch, only that branch's row becomes visible.
+    private static func copyKVSlot(
+        in buffer: MLMultiArray,
+        cache: KVLayerCache,
+        from sourceSlot: Int,
+        to destinationSlot: Int
+    ) {
+        guard sourceSlot != destinationSlot else { return }
+        let pointer = buffer.dataPointer.bindMemory(to: Float16.self, capacity: buffer.count)
+        for head in 0..<cache.heads {
+            let sourceBase = (head * kvCacheCapacity + sourceSlot) * cache.headDim
+            let destinationBase = (head * kvCacheCapacity + destinationSlot) * cache.headDim
+            for index in 0..<cache.headDim {
+                pointer[destinationBase + index] = pointer[sourceBase + index]
+            }
+        }
+    }
+
     /// Decode-step mask [1,1,1,capacity+1]: slots [leftPad, written) and the
     /// new token itself (last column) are visible; pads and unwritten slots
     /// stay at -inf.
@@ -2319,10 +2499,94 @@ enum ProbeRunner {
         return mask
     }
 
+    /// Verify mask [1,1,Q,capacity+Q]. Every row sees the valid cache prefix;
+    /// row r additionally sees query rows 0...r.
+    private static func makeKVVerifyMask(
+        queryLength: Int,
+        leftPadCount: Int,
+        written: Int
+    ) throws -> MLMultiArray {
+        let width = kvCacheCapacity + queryLength
+        let mask = try MLMultiArray(
+            shape: [1, 1, NSNumber(value: queryLength), NSNumber(value: width)],
+            dataType: .float16
+        )
+        let pointer = mask.dataPointer.bindMemory(to: Float16.self, capacity: mask.count)
+        for index in 0..<mask.count { pointer[index] = Float16(-65504.0) }
+        for row in 0..<queryLength {
+            let rowBase = row * width
+            for column in leftPadCount..<min(written, kvCacheCapacity) {
+                pointer[rowBase + column] = 0
+            }
+            for column in 0...row {
+                pointer[rowBase + kvCacheCapacity + column] = 0
+            }
+        }
+        return mask
+    }
+
+    /// One-level tree mask for [root, sibling1, sibling2, sibling3]. The root
+    /// sees itself; every sibling sees the root and itself, but not the other
+    /// candidates. All rows see the same valid cache prefix.
+    private static func makeKVTreeVerifyMask(
+        queryLength: Int,
+        leftPadCount: Int,
+        written: Int
+    ) throws -> MLMultiArray {
+        let width = kvCacheCapacity + queryLength
+        let mask = try MLMultiArray(
+            shape: [1, 1, NSNumber(value: queryLength), NSNumber(value: width)],
+            dataType: .float16
+        )
+        let pointer = mask.dataPointer.bindMemory(to: Float16.self, capacity: mask.count)
+        for index in 0..<mask.count { pointer[index] = Float16(-65504.0) }
+        for row in 0..<queryLength {
+            let rowBase = row * width
+            for column in leftPadCount..<min(written, kvCacheCapacity) {
+                pointer[rowBase + column] = 0
+            }
+            pointer[rowBase + kvCacheCapacity] = 0
+            if row > 0 {
+                pointer[rowBase + kvCacheCapacity + row] = 0
+            }
+        }
+        return mask
+    }
+
+    private static func makeKVTreePositionIDs(
+        queryLength: Int,
+        rootPosition: Int
+    ) throws -> MLMultiArray {
+        let positions = try MLMultiArray(
+            shape: [1, NSNumber(value: queryLength)],
+            dataType: .int32
+        )
+        positions[0] = NSNumber(value: rootPosition)
+        for row in 1..<queryLength {
+            positions[row] = NSNumber(value: rootPosition + 1)
+        }
+        return positions
+    }
+
+    /// The MTP drafter cross-attends to the target's layer46/layer47 cache and
+    /// never writes its own KV. Its fixed seq-1 graph therefore needs only the
+    /// visible cache-prefix mask, with a constant position for the whole round.
+    private static func makeDrafterMask(leftPadCount: Int, written: Int) throws -> MLMultiArray {
+        let mask = try MLMultiArray(
+            shape: [1, 1, 1, NSNumber(value: kvCacheCapacity)],
+            dataType: .float16
+        )
+        let pointer = mask.dataPointer.bindMemory(to: Float16.self, capacity: mask.count)
+        for index in 0..<mask.count { pointer[index] = Float16(-65504.0) }
+        for index in leftPadCount..<min(written, kvCacheCapacity) { pointer[index] = 0 }
+        return mask
+    }
+
     private struct KVChatModels {
         let embeddingSeq1: MLModel
         let lmHead: LoadedProbeModel
         let decoders: [String: MLModel]
+        let drafter: LoadedProbeModel?
     }
 
     private static var residentKVModels: KVChatModels?
@@ -2335,12 +2599,15 @@ enum ProbeRunner {
 
     private static func ensureResidentKVModels(
         layerCount: Int,
-        retainCount: Int,
+        decodeRetainCount: Int,
+        verifyRetainCount: Int,
+        drafterName: String?,
         endpointConfig: MLModelConfiguration,
         decoderConfig: MLModelConfiguration,
+        drafterConfig: MLModelConfiguration,
         steps: inout [ProbeStep]
     ) throws -> KVChatModels {
-        let signature = "kv|\(layerCount)|retain\(retainCount)|ep\(endpointConfig.computeUnits.rawValue)|dec\(decoderConfig.computeUnits.rawValue)"
+        let signature = "kv|\(layerCount)|decodeRetain\(decodeRetainCount)|verifyRetain\(verifyRetainCount)|drafter=\(drafterName ?? "none")|ep\(endpointConfig.computeUnits.rawValue)|dec\(decoderConfig.computeUnits.rawValue)|draft\(drafterConfig.computeUnits.rawValue)|fullANE\(kvFullLayersUseANE)"
         if let models = residentKVModels, residentKVSignature == signature {
             recordStep("Resident KV models", detail: "reused signature=\(signature)", steps: &steps)
             return models
@@ -2349,14 +2616,24 @@ enum ProbeRunner {
         releaseResidentChatModels()
         recordStep("Resident KV models", detail: "loading signature=\(signature)", steps: &steps)
         var decoders: [String: MLModel] = [:]
-        for layer in 0..<min(retainCount, layerCount) {
+        for layer in 0..<min(decodeRetainCount, layerCount) {
             let name = kvDecodeName(layer: layer)
+            decoders[name] = try loadModel(named: name, config: kvDecodeConfig(layer: layer, base: decoderConfig), steps: &steps)
+        }
+        for layer in 0..<min(verifyRetainCount, layerCount) {
+            let name = kvVerifyName(layer: layer)
             decoders[name] = try loadModel(named: name, config: kvDecodeConfig(layer: layer, base: decoderConfig), steps: &steps)
         }
         let models = KVChatModels(
             embeddingSeq1: try loadModel(named: kvEmbeddingSeq1Name, config: makeEmbeddingConfig(), steps: &steps),
             lmHead: try loadLMHead(config: endpointConfig, steps: &steps),
-            decoders: decoders
+            decoders: decoders,
+            drafter: try drafterName.map { name in
+                LoadedProbeModel(
+                    model: try loadModel(named: name, config: drafterConfig, steps: &steps),
+                    name: name
+                )
+            }
         )
         residentKVModels = models
         residentKVSignature = signature
@@ -2387,17 +2664,36 @@ enum ProbeRunner {
         let tokenCount = min(try selectedGeneratedTokenCount(override: generatedTokenCount), kvCacheCapacity - kvPrefillLength)
         let layerCount = min(layerSelection.requestedCount ?? 48, 48)
         let retainCount = retainedDecoderModelCount ?? 0
+        let drafterName = layerCount == 48 && speculativeChatAvailable ? speculativeDrafterName : nil
+        let decodeRetainCount = drafterName == nil && persistent ? retainCount : 0
+        // Seq-4 verify residency was slower on A19 (47.55s vs 43.16s for the
+        // same 24-token output at retain 24 vs 0), even though it reduced
+        // transient loads. Keep it diagnostic-only until Core ML plan
+        // contention improves.
+        let verifyRetainCount = drafterName != nil && persistent
+            ? selectedRetainedVerifyModelCountFromProcess()
+            : 0
+        // The mixed drafter currently falls back to GPU after a failed ANE
+        // compile on A19. Request CPU+GPU directly there to avoid the compile
+        // delay and transient memory spike; preserve the older-device default.
+        let drafterCompute = ProbeComputeSelection.selectedDrafterFromProcess(
+            default: deviceMajorVersion >= 18 ? .cpuAndGPU : .all
+        )
+        let drafterConfig = makeConfig(drafterCompute)
         recordStep(
             "KV generation",
-            detail: "prefill=\(kvPrefillLength) capacity=\(kvCacheCapacity) tokens=\(tokenCount) layers=\(layerCount) retain=\(retainCount) persistent=\(persistent)",
+            detail: "prefill=\(kvPrefillLength) capacity=\(kvCacheCapacity) tokens=\(tokenCount) layers=\(layerCount) decodeRetain=\(decodeRetainCount) verifyRetain=\(verifyRetainCount) speculative=\(drafterName != nil) drafterCompute=\(drafterCompute.title) fullANE=\(kvFullLayersUseANE) persistent=\(persistent)",
             steps: &steps
         )
 
         let models = try ensureResidentKVModels(
             layerCount: layerCount,
-            retainCount: persistent ? retainCount : 0,
+            decodeRetainCount: decodeRetainCount,
+            verifyRetainCount: verifyRetainCount,
+            drafterName: drafterName,
             endpointConfig: endpointConfig,
             decoderConfig: decoderConfig,
+            drafterConfig: drafterConfig,
             steps: &steps
         )
         let caches = try makeKVCaches(layerCount: layerCount)
@@ -2414,7 +2710,7 @@ enum ProbeRunner {
         }
         if let imageHidden {
             let overlaid = try overlayImageHidden(imageHidden, into: hidden, windowStart: imageStartPosition, seqLength: kvPrefillLength)
-            recordStep("Image hidden overlay prefill", detail: "patches=\(overlaid) windowStart=\(imageStartPosition)", steps: &steps)
+            recordStep("Multimodal hidden overlay prefill", detail: "patches=\(overlaid) windowStart=\(imageStartPosition)", steps: &steps)
         }
         let prefillMask = try makeCausalMask(
             seqLength: kvPrefillLength,
@@ -2422,9 +2718,62 @@ enum ProbeRunner {
             bidirectionalBlock: imageBlock
         )
         let prefillPositions = try makePositionIDs(seqLength: kvPrefillLength, start: inputWindow.positionStart, leftPadCount: inputWindow.leftPadCount)
-        for layer in 0..<layerCount {
+        var prefillLayer = 0
+        while prefillLayer < layerCount {
+            let fusedName = fusedKVPrefillName(layerStart: prefillLayer)
+            let usesFusedGroup =
+                prefillLayer.isMultiple(of: fusedKVLayerCount)
+                && prefillLayer + fusedKVLayerCount <= layerCount
+                && ProbeSequenceLength.modelExists(named: fusedName)
+            if usesFusedGroup {
+                hidden = try autoreleasepool { () throws -> MLMultiArray in
+                    let model = try loadModel(
+                        named: fusedName,
+                        config: kvFusedConfig(base: decoderConfig),
+                        steps: &steps
+                    )
+                    let output = try timedPrediction(
+                        name: "KV fused prefill layers \(prefillLayer)...\(prefillLayer + fusedKVLayerCount - 1)",
+                        model: model,
+                        provider: MLDictionaryFeatureProvider(dictionary: [
+                            "x": MLFeatureValue(multiArray: hidden),
+                            "position_ids": MLFeatureValue(multiArray: prefillPositions),
+                            "attention_mask": MLFeatureValue(multiArray: prefillMask)
+                        ]),
+                        steps: &steps
+                    )
+                    for layer in prefillLayer..<(prefillLayer + fusedKVLayerCount) {
+                        let cache = caches[layer]
+                        try copyKVBlock(
+                            requireArray(
+                                named: fusedKVOutputName(prefix: "k_block", layer: layer),
+                                output: output
+                            ),
+                            into: cache.kBuffer,
+                            cache: cache
+                        )
+                        try copyKVBlock(
+                            requireArray(
+                                named: fusedKVOutputName(prefix: "v_block", layer: layer),
+                                output: output
+                            ),
+                            into: cache.vBuffer,
+                            cache: cache
+                        )
+                    }
+                    return try requireArray(named: "y", output: output)
+                }
+                prefillLayer += fusedKVLayerCount
+                continue
+            }
+
+            let layer = prefillLayer
             hidden = try autoreleasepool { () throws -> MLMultiArray in
-                let model = try loadModel(named: kvPrefillName(layer: layer), config: decoderConfig, steps: &steps)
+                let model = try loadModel(
+                    named: kvPrefillName(layer: layer),
+                    config: decoderConfig,
+                    steps: &steps
+                )
                 let output = try timedPrediction(
                     name: "KV prefill layer \(layer)",
                     model: model,
@@ -2440,6 +2789,7 @@ enum ProbeRunner {
                 try copyKVBlock(try requireArray(named: "v_block", output: output), into: cache.vBuffer, cache: cache)
                 return try requireArray(named: "y", output: output)
             }
+            prefillLayer += 1
         }
         var written = kvPrefillLength
         let lastHidden = try copyLastToken(from: hidden, sequenceLength: sequenceLength)
@@ -2456,66 +2806,83 @@ enum ProbeRunner {
         onToken?(token.index)
 
         // ---- Decode loop ----
-        var step = 2
-        while step <= tokenCount {
-            if let stopReason = generationStopReason(predictions: predictions, latestTokenID: token.index) {
-                recordStep("Stop generation", detail: stopReason, steps: &steps)
-                break
-            }
-            let tokenStart = Date()
-            let currentToken = token
-            token = try autoreleasepool { () throws -> (index: Int, logit: Float) in
-                var x = try predictEmbedding(
-                    model: models.embeddingSeq1,
-                    inputIDs: [Int32(currentToken.index)],
-                    name: "KV embedding token \(step)",
-                    steps: &steps
-                )
-                let position = try MLMultiArray(shape: [1, 1], dataType: .int32)
-                // RoPE position is the real-token-relative index (prefill numbers
-                // real tokens 0,1,2,... after the left pad), while the cache slot
-                // is the absolute buffer index. They differ by leftPadCount.
-                position[0] = NSNumber(value: written - inputWindow.leftPadCount)
-                let mask = try makeKVDecodeMask(leftPadCount: inputWindow.leftPadCount, written: written)
-                for layer in 0..<layerCount {
-                    let name = kvDecodeName(layer: layer)
-                    let model: MLModel
-                    if let resident = models.decoders[name] {
-                        model = resident
-                    } else {
-                        model = try loadModel(named: name, config: kvDecodeConfig(layer: layer, base: decoderConfig), steps: &steps)
-                    }
-                    let cache = caches[layer]
-                    let output = try timedPrediction(
-                        name: "KV decode layer \(layer) token \(step)",
-                        model: model,
-                        provider: MLDictionaryFeatureProvider(dictionary: [
-                            "x": MLFeatureValue(multiArray: x),
-                            "position_ids": MLFeatureValue(multiArray: position),
-                            "attention_mask": MLFeatureValue(multiArray: mask),
-                            "k_cache": MLFeatureValue(multiArray: cache.kBuffer),
-                            "v_cache": MLFeatureValue(multiArray: cache.vBuffer)
-                        ]),
+        if let drafter = models.drafter {
+            try runSpeculativeKVDecode(
+                drafter: drafter,
+                models: models,
+                caches: caches,
+                decoderConfig: decoderConfig,
+                inputWindow: inputWindow,
+                tokenCount: tokenCount,
+                initialToken: token,
+                initialAnchorHidden: lastHidden,
+                written: &written,
+                predictions: &predictions,
+                onToken: onToken,
+                steps: &steps
+            )
+        } else {
+            var step = 2
+            while step <= tokenCount {
+                if let stopReason = generationStopReason(predictions: predictions, latestTokenID: token.index) {
+                    recordStep("Stop generation", detail: stopReason, steps: &steps)
+                    break
+                }
+                let tokenStart = Date()
+                let currentToken = token
+                token = try autoreleasepool { () throws -> (index: Int, logit: Float) in
+                    var x = try predictEmbedding(
+                        model: models.embeddingSeq1,
+                        inputIDs: [Int32(currentToken.index)],
+                        name: "KV embedding token \(step)",
                         steps: &steps
                     )
-                    writeKVSlot(try requireArray(named: "k_new", output: output), into: cache.kBuffer, cache: cache, slot: written)
-                    writeKVSlot(try requireArray(named: "v_new", output: output), into: cache.vBuffer, cache: cache, slot: written)
-                    x = try requireArray(named: "y", output: output)
+                    let position = try MLMultiArray(shape: [1, 1], dataType: .int32)
+                    // RoPE position is the real-token-relative index (prefill numbers
+                    // real tokens 0,1,2,... after the left pad), while the cache slot
+                    // is the absolute buffer index. They differ by leftPadCount.
+                    position[0] = NSNumber(value: written - inputWindow.leftPadCount)
+                    let mask = try makeKVDecodeMask(leftPadCount: inputWindow.leftPadCount, written: written)
+                    for layer in 0..<layerCount {
+                        let name = kvDecodeName(layer: layer)
+                        let model: MLModel
+                        if let resident = models.decoders[name] {
+                            model = resident
+                        } else {
+                            model = try loadModel(named: name, config: kvDecodeConfig(layer: layer, base: decoderConfig), steps: &steps)
+                        }
+                        let cache = caches[layer]
+                        let output = try timedPrediction(
+                            name: "KV decode layer \(layer) token \(step)",
+                            model: model,
+                            provider: MLDictionaryFeatureProvider(dictionary: [
+                                "x": MLFeatureValue(multiArray: x),
+                                "position_ids": MLFeatureValue(multiArray: position),
+                                "attention_mask": MLFeatureValue(multiArray: mask),
+                                "k_cache": MLFeatureValue(multiArray: cache.kBuffer),
+                                "v_cache": MLFeatureValue(multiArray: cache.vBuffer)
+                            ]),
+                            steps: &steps
+                        )
+                        writeKVSlot(try requireArray(named: "k_new", output: output), into: cache.kBuffer, cache: cache, slot: written)
+                        writeKVSlot(try requireArray(named: "v_new", output: output), into: cache.vBuffer, cache: cache, slot: written)
+                        x = try requireArray(named: "y", output: output)
+                    }
+                    written += 1
+                    logits = try predictLMHead(model: models.lmHead.model, hidden: x, name: "KV LM head token \(step)", steps: &steps)
+                    return try topLogit(logits)
                 }
-                written += 1
-                logits = try predictLMHead(model: models.lmHead.model, hidden: x, name: "KV LM head token \(step)", steps: &steps)
-                return try topLogit(logits)
+                recordStep("Top logits token \(step)", detail: topLogitsSummary(logits, count: 5), steps: &steps)
+                appendStep(ProbeStep(
+                    name: "Token \(step) total",
+                    seconds: Date().timeIntervalSince(tokenStart),
+                    memoryMB: ProbeMemory.currentMB(),
+                    detail: "#\(token.index) logit=\(String(format: "%.3f", token.logit))"
+                ), to: &steps)
+                predictions.append(TokenPrediction(step: step, index: token.index, logit: token.logit))
+                onToken?(token.index)
+                step += 1
             }
-            recordStep("Top logits token \(step)", detail: topLogitsSummary(logits, count: 5), steps: &steps)
-            appendStep(ProbeStep(
-                name: "Token \(step) total",
-                seconds: Date().timeIntervalSince(tokenStart),
-                memoryMB: ProbeMemory.currentMB(),
-                detail: "#\(token.index) logit=\(String(format: "%.3f", token.logit))"
-            ), to: &steps)
-            predictions.append(TokenPrediction(step: step, index: token.index, logit: token.logit))
-            onToken?(token.index)
-            step += 1
         }
         if !persistent {
             releaseResidentKVModels()
@@ -2523,6 +2890,624 @@ enum ProbeRunner {
         }
         recordGeneratedTokens(predictions, steps: &steps)
         return predictions
+    }
+
+    /// Greedy speculative decoding with the Gemma 4 MTP assistant.
+    ///
+    /// Invariant: `written` target-cache slots contain every processed token
+    /// *before* `currentToken`; `anchorHidden` is the target hidden state that
+    /// predicted `currentToken`. That is exactly the embedding/hidden pairing
+    /// expected by Gemma4's single-position MTP candidate generator.
+    private static func runSpeculativeKVDecode(
+        drafter: LoadedProbeModel,
+        models: KVChatModels,
+        caches: [KVLayerCache],
+        decoderConfig: MLModelConfiguration,
+        inputWindow: TokenWindow,
+        tokenCount: Int,
+        initialToken: (index: Int, logit: Float),
+        initialAnchorHidden: MLMultiArray,
+        written: inout Int,
+        predictions: inout [TokenPrediction],
+        onToken: ((Int) -> Void)?,
+        steps: inout [ProbeStep]
+    ) throws {
+        let verifyLength = speculativeVerifyLength
+        let draftCount = verifyLength - 1
+        guard caches.count == 48, draftCount > 0 else {
+            throw ProbeError.unexpectedShape(
+                "speculative decode requires 48 caches and verify length >= 2"
+            )
+        }
+
+        var currentToken = initialToken
+        var anchorHidden = initialAnchorHidden
+        var round = 0
+        var proposedDrafts = 0
+        var matchedDrafts = 0
+        var verifiedTokens = 0
+        var consecutiveZeroMatchRounds = 0
+        var targetOnlyRoundsRemaining = 0
+        var targetOnlyRounds = 0
+        var treeRoundsRemaining = 0
+        var treeRounds = 0
+        var top1RecallHits = 0
+        var top3RecallHits = 0
+        var top3RecallAttempts = 0
+        var treeHits = 0
+        var treeAttempts = 0
+
+        recordStep(
+            "Speculative decode",
+            detail: "drafter=\(drafter.name) verify=\(verifyLength) drafts=\(draftCount) adaptiveTree=\(speculativeAdaptiveTreeEnabled)",
+            steps: &steps
+        )
+
+        while predictions.count < tokenCount {
+            if let stopReason = generationStopReason(
+                predictions: predictions,
+                latestTokenID: currentToken.index
+            ) {
+                recordStep("Stop generation", detail: stopReason, steps: &steps)
+                break
+            }
+
+            // A fixed-width verifier cannot run across the cache boundary. The
+            // normal seq-1 target path handles the final one to three slots.
+            if written + verifyLength > kvCacheCapacity {
+                let tokenStart = Date()
+                let result = try runSingleKVDecode(
+                    currentToken: currentToken,
+                    written: written,
+                    step: predictions.count + 1,
+                    models: models,
+                    caches: caches,
+                    decoderConfig: decoderConfig,
+                    leftPadCount: inputWindow.leftPadCount,
+                    steps: &steps
+                )
+                written += 1
+                currentToken = result.token
+                anchorHidden = result.anchorHidden
+                let step = predictions.count + 1
+                appendStep(ProbeStep(
+                    name: "Token \(step) total",
+                    seconds: Date().timeIntervalSince(tokenStart),
+                    memoryMB: ProbeMemory.currentMB(),
+                    detail: "#\(currentToken.index) logit=\(String(format: "%.3f", currentToken.logit)) (seq1 boundary fallback)"
+                ), to: &steps)
+                predictions.append(TokenPrediction(
+                    step: step,
+                    index: currentToken.index,
+                    logit: currentToken.logit
+                ))
+                onToken?(currentToken.index)
+                continue
+            }
+
+            round += 1
+            let isTreeRound = speculativeAdaptiveTreeEnabled && treeRoundsRemaining > 0
+            let scheduledDraftCount: Int
+            if isTreeRound {
+                scheduledDraftCount = 1
+                treeRoundsRemaining -= 1
+                treeRounds += 1
+                treeAttempts += 1
+            } else if targetOnlyRoundsRemaining > 0 {
+                scheduledDraftCount = 0
+                targetOnlyRoundsRemaining -= 1
+                targetOnlyRounds += 1
+            } else {
+                scheduledDraftCount = draftCount
+            }
+            let roundStart = Date()
+            let drafterMask = try makeDrafterMask(
+                leftPadCount: inputWindow.leftPadCount,
+                written: written
+            )
+            let drafterPosition = try MLMultiArray(shape: [1, 1], dataType: .int32)
+            drafterPosition[0] = NSNumber(value: written - inputWindow.leftPadCount)
+
+            var draftHidden = anchorHidden
+            var draftLastToken = currentToken
+            var drafts: [(index: Int, logit: Float)] = []
+            var firstDraftCandidates: [(index: Int, logit: Float)] = []
+            for draftIndex in 0..<scheduledDraftCount {
+                let result = try autoreleasepool { () throws -> (
+                    token: (index: Int, logit: Float),
+                    hidden: MLMultiArray,
+                    candidates: [(index: Int, logit: Float)]
+                ) in
+                    let tokenEmbedding = try predictEmbedding(
+                        model: models.embeddingSeq1,
+                        inputIDs: [Int32(draftLastToken.index)],
+                        name: "Speculative embedding round \(round) draft \(draftIndex + 1)",
+                        steps: &steps
+                    )
+                    let output = try timedPrediction(
+                        name: "MTP draft round \(round) token \(draftIndex + 1)",
+                        model: drafter.model,
+                        provider: MLDictionaryFeatureProvider(dictionary: [
+                            "backbone_hidden": MLFeatureValue(multiArray: draftHidden),
+                            "token_emb": MLFeatureValue(multiArray: tokenEmbedding),
+                            "sliding_k": MLFeatureValue(multiArray: caches[46].kBuffer),
+                            "sliding_v": MLFeatureValue(multiArray: caches[46].vBuffer),
+                            "full_k": MLFeatureValue(multiArray: caches[47].kBuffer),
+                            "full_v": MLFeatureValue(multiArray: caches[47].vBuffer),
+                            "position_ids": MLFeatureValue(multiArray: drafterPosition),
+                            "attention_mask": MLFeatureValue(multiArray: drafterMask)
+                        ]),
+                        steps: &steps
+                    )
+                    let candidateLogits = try requireArray(named: "logits", output: output)
+                    let candidates = try topLogits(candidateLogits, count: draftCount)
+                    return (
+                        candidates[0],
+                        try float16Copy(
+                            of: requireArray(named: "projected_hidden", output: output)
+                        ),
+                        candidates
+                    )
+                }
+                if draftIndex == 0 {
+                    firstDraftCandidates = result.candidates
+                }
+                let next = result.token
+                drafts.append(next)
+                draftLastToken = next
+                draftHidden = result.hidden
+            }
+            if isTreeRound {
+                drafts = firstDraftCandidates
+            } else {
+                proposedDrafts += drafts.count
+            }
+
+            // The verifier has a fixed sequence length of four. During an
+            // adaptive target-only sweep, pad the unused future rows with the
+            // current token. Causal attention means row zero is independent of
+            // those rows, and only row zero's KV slot is committed.
+            var verifyTokenIDs = [currentToken.index] + drafts.map(\.index)
+            while verifyTokenIDs.count < verifyLength {
+                verifyTokenIDs.append(currentToken.index)
+            }
+            var targetHidden = try makeEmbeddingSequence(
+                tokenIDs: verifyTokenIDs,
+                model: models.embeddingSeq1,
+                round: round,
+                steps: &steps
+            )
+            let verifyPositions = if isTreeRound {
+                try makeKVTreePositionIDs(
+                    queryLength: verifyLength,
+                    rootPosition: written - inputWindow.leftPadCount
+                )
+            } else {
+                try makePositionIDs(
+                    seqLength: verifyLength,
+                    start: written - inputWindow.leftPadCount
+                )
+            }
+            let verifyMask = if isTreeRound {
+                try makeKVTreeVerifyMask(
+                    queryLength: verifyLength,
+                    leftPadCount: inputWindow.leftPadCount,
+                    written: written
+                )
+            } else {
+                try makeKVVerifyMask(
+                    queryLength: verifyLength,
+                    leftPadCount: inputWindow.leftPadCount,
+                    written: written
+                )
+            }
+
+            let verifyStart = Date()
+            var verifyLayer = 0
+            while verifyLayer < caches.count {
+                let fusedName = fusedKVVerifyName(layerStart: verifyLayer)
+                let usesFusedGroup =
+                    verifyLayer.isMultiple(of: fusedKVLayerCount)
+                    && verifyLayer + fusedKVLayerCount <= caches.count
+                    && ProbeSequenceLength.modelExists(named: fusedName)
+                if usesFusedGroup {
+                    targetHidden = try autoreleasepool { () throws -> MLMultiArray in
+                        let model = try loadModel(
+                            named: fusedName,
+                            config: kvFusedConfig(base: decoderConfig),
+                            steps: &steps
+                        )
+                        var features: [String: MLFeatureValue] = [
+                            "x": MLFeatureValue(multiArray: targetHidden),
+                            "position_ids": MLFeatureValue(multiArray: verifyPositions),
+                            "attention_mask": MLFeatureValue(multiArray: verifyMask)
+                        ]
+                        for layer in verifyLayer..<(verifyLayer + fusedKVLayerCount) {
+                            features[fusedKVOutputName(prefix: "k_cache", layer: layer)] =
+                                MLFeatureValue(multiArray: caches[layer].kBuffer)
+                            features[fusedKVOutputName(prefix: "v_cache", layer: layer)] =
+                                MLFeatureValue(multiArray: caches[layer].vBuffer)
+                        }
+                        let output = try timedPrediction(
+                            name: "KV fused verify layers \(verifyLayer)...\(verifyLayer + fusedKVLayerCount - 1) round \(round)",
+                            model: model,
+                            provider: MLDictionaryFeatureProvider(dictionary: features),
+                            steps: &steps
+                        )
+                        for layer in verifyLayer..<(verifyLayer + fusedKVLayerCount) {
+                            let cache = caches[layer]
+                            try copyKVBlock(
+                                requireArray(
+                                    named: fusedKVOutputName(prefix: "k_new", layer: layer),
+                                    output: output
+                                ),
+                                into: cache.kBuffer,
+                                cache: cache,
+                                startSlot: written
+                            )
+                            try copyKVBlock(
+                                requireArray(
+                                    named: fusedKVOutputName(prefix: "v_new", layer: layer),
+                                    output: output
+                                ),
+                                into: cache.vBuffer,
+                                cache: cache,
+                                startSlot: written
+                            )
+                        }
+                        return try requireArray(named: "y", output: output)
+                    }
+                    verifyLayer += fusedKVLayerCount
+                    continue
+                }
+
+                let layer = verifyLayer
+                targetHidden = try autoreleasepool { () throws -> MLMultiArray in
+                    let name = kvVerifyName(layer: layer)
+                    let model: MLModel
+                    if let resident = models.decoders[name] {
+                        model = resident
+                    } else {
+                        model = try loadModel(
+                            named: name,
+                            config: kvDecodeConfig(layer: layer, base: decoderConfig),
+                            steps: &steps
+                        )
+                    }
+                    let cache = caches[layer]
+                    let output = try timedPrediction(
+                        name: "KV verify layer \(layer) round \(round)",
+                        model: model,
+                        provider: MLDictionaryFeatureProvider(dictionary: [
+                            "x": MLFeatureValue(multiArray: targetHidden),
+                            "position_ids": MLFeatureValue(multiArray: verifyPositions),
+                            "attention_mask": MLFeatureValue(multiArray: verifyMask),
+                            "k_cache": MLFeatureValue(multiArray: cache.kBuffer),
+                            "v_cache": MLFeatureValue(multiArray: cache.vBuffer)
+                        ]),
+                        steps: &steps
+                    )
+                    try copyKVBlock(
+                        requireArray(named: "k_new", output: output),
+                        into: cache.kBuffer,
+                        cache: cache,
+                        startSlot: written
+                    )
+                    try copyKVBlock(
+                        requireArray(named: "v_new", output: output),
+                        into: cache.vBuffer,
+                        cache: cache,
+                        startSlot: written
+                    )
+                    return try requireArray(named: "y", output: output)
+                }
+                verifyLayer += 1
+            }
+            let verifySeconds = Date().timeIntervalSince(verifyStart)
+
+            var targetTokens: [(index: Int, logit: Float)] = []
+            let evaluatedRowCount = isTreeRound ? verifyLength : drafts.count + 1
+            for row in 0..<evaluatedRowCount {
+                let target = try autoreleasepool { () throws -> (index: Int, logit: Float) in
+                    let rowHidden = try copySequenceToken(
+                        from: targetHidden,
+                        tokenIndex: row,
+                        sequenceLength: verifyLength
+                    )
+                    let rowLogits = try predictLMHead(
+                        model: models.lmHead.model,
+                        hidden: rowHidden,
+                        name: "Speculative LM head round \(round) row \(row)",
+                        steps: &steps
+                    )
+                    return try topLogit(rowLogits)
+                }
+                targetTokens.append(target)
+            }
+
+            if !firstDraftCandidates.isEmpty {
+                top3RecallAttempts += 1
+                let targetID = targetTokens[0].index
+                let recallRank = firstDraftCandidates.firstIndex(where: { $0.index == targetID })
+                if recallRank == 0 {
+                    top1RecallHits += 1
+                }
+                if recallRank != nil {
+                    top3RecallHits += 1
+                }
+                let candidateText = firstDraftCandidates
+                    .map { "#\($0.index)=\(String(format: "%.3f", $0.logit))" }
+                    .joined(separator: ",")
+                recordStep(
+                    "MTP top3 round \(round)",
+                    detail: "candidates=[\(candidateText)] target=#\(targetID) rank=\(recallRank.map { String($0 + 1) } ?? "miss") mode=\(isTreeRound ? "tree" : "linear")",
+                    steps: &steps
+                )
+            }
+
+            var matched = 0
+            var treeCandidateRow: Int?
+            let selectedTargets: [(index: Int, logit: Float)]
+            if isTreeRound {
+                if let candidateIndex = drafts.firstIndex(where: { $0.index == targetTokens[0].index }) {
+                    treeCandidateRow = candidateIndex + 1
+                    treeHits += 1
+                    matched = 1
+                    selectedTargets = [targetTokens[0], targetTokens[candidateIndex + 1]]
+                } else {
+                    selectedTargets = [targetTokens[0]]
+                }
+                consecutiveZeroMatchRounds = 0
+            } else {
+                while matched < drafts.count,
+                      drafts[matched].index == targetTokens[matched].index {
+                    matched += 1
+                }
+                matchedDrafts += matched
+                selectedTargets = Array(targetTokens.prefix(matched + 1))
+            }
+
+            if isTreeRound {
+                // The breadth phase is deliberately bounded. Return to the
+                // longer linear chain afterwards and re-enter only when two
+                // new top-1 misses demonstrate that breadth is useful again.
+            } else if drafts.isEmpty {
+                if targetOnlyRoundsRemaining == 0 {
+                    consecutiveZeroMatchRounds = 0
+                }
+            } else if matched == 0 {
+                consecutiveZeroMatchRounds += 1
+                if consecutiveZeroMatchRounds >= 2 {
+                    if speculativeAdaptiveTreeEnabled {
+                        treeRoundsRemaining = 4
+                    } else {
+                        targetOnlyRoundsRemaining = 4
+                    }
+                    consecutiveZeroMatchRounds = 0
+                    recordStep(
+                        "Speculative schedule",
+                        detail: speculativeAdaptiveTreeEnabled
+                            ? "two zero-match rounds; top3 tree sweeps=4"
+                            : "two zero-match rounds; target-only sweeps=4",
+                        steps: &steps
+                    )
+                }
+            } else {
+                consecutiveZeroMatchRounds = 0
+            }
+            let remaining = tokenCount - predictions.count
+            let emitLimit = min(selectedTargets.count, remaining)
+            var emitted = 0
+            var stopReason: String?
+            for target in selectedTargets.prefix(emitLimit) {
+                let step = predictions.count + 1
+                predictions.append(TokenPrediction(
+                    step: step,
+                    index: target.index,
+                    logit: target.logit
+                ))
+                onToken?(target.index)
+                emitted += 1
+                if let reason = generationStopReason(
+                    predictions: predictions,
+                    latestTokenID: target.index
+                ) {
+                    stopReason = reason
+                    break
+                }
+            }
+
+            guard emitted > 0 else {
+                throw ProbeError.unexpectedShape("speculative verify emitted no target token")
+            }
+            if isTreeRound, emitted >= 2, let treeCandidateRow {
+                for cache in caches {
+                    copyKVSlot(
+                        in: cache.kBuffer,
+                        cache: cache,
+                        from: written + treeCandidateRow,
+                        to: written + 1
+                    )
+                    copyKVSlot(
+                        in: cache.vBuffer,
+                        cache: cache,
+                        from: written + treeCandidateRow,
+                        to: written + 1
+                    )
+                }
+            }
+            verifiedTokens += emitted
+            written += emitted
+            currentToken = selectedTargets[emitted - 1]
+            let anchorHiddenRow = if isTreeRound, emitted >= 2, let treeCandidateRow {
+                treeCandidateRow
+            } else {
+                emitted - 1
+            }
+            anchorHidden = try copySequenceToken(
+                from: targetHidden,
+                tokenIndex: anchorHiddenRow,
+                sequenceLength: verifyLength
+            )
+
+            let draftText = drafts.map { "#\($0.index)" }.joined(separator: ",")
+            let targetText = targetTokens.map { "#\($0.index)" }.joined(separator: ",")
+            let roundSeconds = Date().timeIntervalSince(roundStart)
+            let firstEmittedStep = predictions.count - emitted + 1
+            for offset in 0..<emitted {
+                let emittedTarget = selectedTargets[offset]
+                appendStep(ProbeStep(
+                    name: "Token \(firstEmittedStep + offset) total",
+                    seconds: roundSeconds / Double(emitted),
+                    memoryMB: ProbeMemory.currentMB(),
+                    detail: "#\(emittedTarget.index) logit=\(String(format: "%.3f", emittedTarget.logit)) (speculative round \(round))"
+                ), to: &steps)
+            }
+            appendStep(ProbeStep(
+                name: "Speculative round \(round) total",
+                seconds: roundSeconds,
+                memoryMB: ProbeMemory.currentMB(),
+                detail: "mode=\(isTreeRound ? "tree" : (drafts.isEmpty ? "target-only" : "mtp")) draft=[\(draftText)] target=[\(targetText)] matched=\(matched)/\(isTreeRound ? 1 : drafts.count) emitted=\(emitted) verify=\(String(format: "%.3f", verifySeconds))s"
+            ), to: &steps)
+            if let stopReason {
+                recordStep("Stop generation", detail: stopReason, steps: &steps)
+                break
+            }
+        }
+
+        let acceptance = proposedDrafts > 0
+            ? Double(matchedDrafts) / Double(proposedDrafts)
+            : 0
+        let tokensPerSweep = round > 0 ? Double(verifiedTokens) / Double(round) : 0
+        recordStep(
+            "Speculative summary",
+            detail: "rounds=\(round) targetOnly=\(targetOnlyRounds) tree=\(treeRounds) matched=\(matchedDrafts)/\(proposedDrafts) acceptance=\(String(format: "%.3f", acceptance)) top1=\(top1RecallHits)/\(top3RecallAttempts) top3=\(top3RecallHits)/\(top3RecallAttempts) treeHits=\(treeHits)/\(treeAttempts) tokensPerSweep=\(String(format: "%.2f", tokensPerSweep))",
+            steps: &steps
+        )
+    }
+
+    private static func runSingleKVDecode(
+        currentToken: (index: Int, logit: Float),
+        written: Int,
+        step: Int,
+        models: KVChatModels,
+        caches: [KVLayerCache],
+        decoderConfig: MLModelConfiguration,
+        leftPadCount: Int,
+        steps: inout [ProbeStep]
+    ) throws -> (
+        token: (index: Int, logit: Float),
+        logits: MLMultiArray,
+        anchorHidden: MLMultiArray
+    ) {
+        var hidden = try predictEmbedding(
+            model: models.embeddingSeq1,
+            inputIDs: [Int32(currentToken.index)],
+            name: "KV embedding token \(step)",
+            steps: &steps
+        )
+        let position = try MLMultiArray(shape: [1, 1], dataType: .int32)
+        position[0] = NSNumber(value: written - leftPadCount)
+        let mask = try makeKVDecodeMask(leftPadCount: leftPadCount, written: written)
+        for layer in 0..<caches.count {
+            let name = kvDecodeName(layer: layer)
+            let model: MLModel
+            if let resident = models.decoders[name] {
+                model = resident
+            } else {
+                model = try loadModel(
+                    named: name,
+                    config: kvDecodeConfig(layer: layer, base: decoderConfig),
+                    steps: &steps
+                )
+            }
+            let cache = caches[layer]
+            let output = try timedPrediction(
+                name: "KV decode layer \(layer) token \(step)",
+                model: model,
+                provider: MLDictionaryFeatureProvider(dictionary: [
+                    "x": MLFeatureValue(multiArray: hidden),
+                    "position_ids": MLFeatureValue(multiArray: position),
+                    "attention_mask": MLFeatureValue(multiArray: mask),
+                    "k_cache": MLFeatureValue(multiArray: cache.kBuffer),
+                    "v_cache": MLFeatureValue(multiArray: cache.vBuffer)
+                ]),
+                steps: &steps
+            )
+            writeKVSlot(
+                try requireArray(named: "k_new", output: output),
+                into: cache.kBuffer,
+                cache: cache,
+                slot: written
+            )
+            writeKVSlot(
+                try requireArray(named: "v_new", output: output),
+                into: cache.vBuffer,
+                cache: cache,
+                slot: written
+            )
+            hidden = try requireArray(named: "y", output: output)
+        }
+        let logits = try predictLMHead(
+            model: models.lmHead.model,
+            hidden: hidden,
+            name: "KV LM head token \(step)",
+            steps: &steps
+        )
+        return (try topLogit(logits), logits, hidden)
+    }
+
+    private static func makeEmbeddingSequence(
+        tokenIDs: [Int],
+        model: MLModel,
+        round: Int,
+        steps: inout [ProbeStep]
+    ) throws -> MLMultiArray {
+        let sequence = try MLMultiArray(
+            shape: [1, NSNumber(value: tokenIDs.count), 3840],
+            dataType: .float16
+        )
+        let destination = sequence.dataPointer.bindMemory(to: Float16.self, capacity: sequence.count)
+        for (row, tokenID) in tokenIDs.enumerated() {
+            let embedding = try predictEmbedding(
+                model: model,
+                inputIDs: [Int32(tokenID)],
+                name: "Speculative verify embedding round \(round) row \(row)",
+                steps: &steps
+            )
+            guard embedding.dataType == .float16, embedding.count == 3840 else {
+                throw ProbeError.unexpectedShape("verify embedding \(embedding.shape)")
+            }
+            let source = embedding.dataPointer.bindMemory(to: Float16.self, capacity: embedding.count)
+            let destinationBase = row * 3840
+            for index in 0..<3840 {
+                destination[destinationBase + index] = source[index]
+            }
+        }
+        return sequence
+    }
+
+    private static func copySequenceToken(
+        from sequence: MLMultiArray,
+        tokenIndex: Int,
+        sequenceLength: Int
+    ) throws -> MLMultiArray {
+        guard sequence.dataType == .float16,
+              tokenIndex >= 0,
+              tokenIndex < sequenceLength,
+              sequence.count >= sequenceLength * 3840 else {
+            throw ProbeError.unexpectedShape(
+                "sequence token index=\(tokenIndex) length=\(sequenceLength) shape=\(sequence.shape)"
+            )
+        }
+        let token = try MLMultiArray(shape: [1, 1, 3840], dataType: .float16)
+        let source = sequence.dataPointer.bindMemory(to: Float16.self, capacity: sequence.count)
+        let destination = token.dataPointer.bindMemory(to: Float16.self, capacity: token.count)
+        let sourceBase = tokenIndex * 3840
+        for index in 0..<3840 {
+            destination[index] = source[sourceBase + index]
+        }
+        return token
     }
 
     private static func runLMHead(
@@ -2927,7 +3912,7 @@ enum ProbeRunner {
     private static func float16Copy(of array: MLMultiArray) throws -> MLMultiArray {
         if array.dataType == .float16 { return array }
         guard array.dataType == .float32 else {
-            throw ProbeError.unexpectedShape("expected float16/float32 image_hidden, got \(array.dataType)")
+            throw ProbeError.unexpectedShape("expected float16/float32 hidden output, got \(array.dataType)")
         }
         let copy = try MLMultiArray(shape: array.shape, dataType: .float16)
         let source = array.dataPointer.bindMemory(to: Float.self, capacity: array.count)

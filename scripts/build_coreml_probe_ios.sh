@@ -10,6 +10,7 @@ PROJECT="$ROOT_DIR/ios/CoreMLProbe/CoreMLProbe.xcodeproj"
 # a 13GB app bundle to iCloud on every build).
 DERIVED_DATA="${COREML_PROBE_DERIVED_DATA:-$HOME/Library/Caches/llm-smallification/CoreMLProbe}"
 DESTINATION="${1:-platform=iOS Simulator,name=iPhone 17,OS=26.5}"
+SIGNING_TEAM="${COREML_PROBE_DEVELOPMENT_TEAM:-${DEVELOPMENT_TEAM:-}}"
 
 clear_packaging_xattrs() {
   local target="$1"
@@ -35,11 +36,17 @@ clear_packaging_xattrs "$DERIVED_DATA/Build/Products/Debug-iphonesimulator/CoreM
 # entitlements file (e.g. Increased Memory Limit) on the App ID and regenerate
 # the provisioning profile without opening the Xcode UI. Requires the Apple
 # Developer PLA to be accepted and Xcode to be signed in to the account.
-xcodebuild \
-  -project "$PROJECT" \
-  -scheme CoreMLProbe \
-  -configuration Debug \
-  -destination "$DESTINATION" \
-  -derivedDataPath "$DERIVED_DATA" \
-  -allowProvisioningUpdates \
+xcodebuild_args=(
+  -project "$PROJECT"
+  -scheme CoreMLProbe
+  -configuration Debug
+  -destination "$DESTINATION"
+  -derivedDataPath "$DERIVED_DATA"
+  -allowProvisioningUpdates
   build
+)
+if [[ -n "$SIGNING_TEAM" ]]; then
+  xcodebuild_args+=("DEVELOPMENT_TEAM=$SIGNING_TEAM")
+fi
+
+xcodebuild "${xcodebuild_args[@]}"

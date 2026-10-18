@@ -148,6 +148,23 @@ def main() -> None:
     parser.add_argument("--seq-len", type=int, default=4)
     parser.add_argument("--chunk-size", type=int, default=1)
     parser.add_argument("--block-size", type=int, default=32)
+    parser.add_argument(
+        "--quant",
+        choices=["int4-block", "palettize4"],
+        default="int4-block",
+        help=(
+            "int4-block: linear int4 per-block (BNNS/CPU-only on device, current"
+            " assets). palettize4: 4-bit LUT palettization, the representation"
+            " the ANE can execute — used to probe escaping the BNNS"
+            " concurrent-plan limit."
+        ),
+    )
+    parser.add_argument(
+        "--group-size",
+        type=int,
+        default=16,
+        help="per_grouped_channel group size for --quant palettize4",
+    )
     parser.add_argument("--keep-fp16", action="store_true")
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
@@ -180,14 +197,26 @@ def main() -> None:
     )
 
     layers = parse_layers(args.layers, len(language_model.layers))
-    quant_config = cto.OptimizationConfig(
-        global_config=cto.OpLinearQuantizerConfig(
-            mode="linear_symmetric",
-            dtype="int4",
-            granularity="per_block",
-            block_size=args.block_size,
+    if args.quant == "int4-block":
+        quant_config = cto.OptimizationConfig(
+            global_config=cto.OpLinearQuantizerConfig(
+                mode="linear_symmetric",
+                dtype="int4",
+                granularity="per_block",
+                block_size=args.block_size,
+            )
         )
-    )
+        quant_suffix = f"int4_block{args.block_size}"
+    else:  # palettize4
+        quant_config = cto.OptimizationConfig(
+            global_config=cto.OpPalettizerConfig(
+                mode="kmeans",
+                nbits=4,
+                granularity="per_grouped_channel",
+                group_size=args.group_size,
+            )
+        )
+        quant_suffix = f"pal4_g{args.group_size}"
 
     seq_len = args.seq_len
     example_x = torch.randn(1, seq_len, 3840, device="cuda", dtype=torch.float16)
@@ -214,7 +243,7 @@ def main() -> None:
         attn = language_model.layers[first_layer_idx].self_attn
         prefix = decoder_prefix(group, seq_len)
         fp16_path = out_dir / f"{prefix}_fp16.mlpackage"
-        int4_path = out_dir / f"{prefix}_int4_block{args.block_size}.mlpackage"
+        int4_path = out_dir / f"{prefix}_{quant_suffix}.mlpackage"
 
         if int4_path.exists() and not args.force:
             size = package_size(int4_path)
@@ -286,7 +315,10 @@ def main() -> None:
             mlmodel.save(fp16_path)
             print("saved_fp16", fp16_path, package_size(fp16_path), flush=True)
 
-        qmodel = cto.linear_quantize_weights(mlmodel, config=quant_config)
+        if args.quant == "int4-block":
+            qmodel = cto.linear_quantize_weights(mlmodel, config=quant_config)
+        else:
+            qmodel = cto.palettize_weights(mlmodel, config=quant_config)
         qmodel.save(int4_path)
         int4_size = package_size(int4_path)
         total_int4_size += int4_size

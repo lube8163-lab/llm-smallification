@@ -74,12 +74,13 @@ def convert_package(
     output_name: str,
     out_dir: Path,
     quant_config: cto.OptimizationConfig,
-    block_size: int,
+    quant_suffix: str,
+    quant_kind: str,
     keep_fp16: bool,
     force: bool,
 ) -> None:
     fp16_path = out_dir / f"{name}_fp16.mlpackage"
-    int4_path = out_dir / f"{name}_int4_block{block_size}.mlpackage"
+    int4_path = out_dir / f"{name}_{quant_suffix}.mlpackage"
 
     if int4_path.exists() and not force:
         print("skip_existing", int4_path, "bytes", package_size(int4_path), flush=True)
@@ -108,7 +109,10 @@ def convert_package(
         mlmodel.save(fp16_path)
         print("saved_fp16", fp16_path, package_size(fp16_path), flush=True)
 
-    qmodel = cto.linear_quantize_weights(mlmodel, config=quant_config)
+    if quant_kind == "int4-block":
+        qmodel = cto.linear_quantize_weights(mlmodel, config=quant_config)
+    else:
+        qmodel = cto.palettize_weights(mlmodel, config=quant_config)
     qmodel.save(int4_path)
     print(
         "saved_int4",
@@ -137,6 +141,22 @@ def main() -> None:
     )
     parser.add_argument("--seq-len", type=int, default=4)
     parser.add_argument("--block-size", type=int, default=32)
+    parser.add_argument(
+        "--quant",
+        choices=["int4-block", "palettize4"],
+        default="int4-block",
+        help=(
+            "int4-block: linear int4 per-block (CPU/BNNS on device)."
+            " palettize4: 4-bit LUT palettization so the endpoint can run on"
+            " the ANE alongside pal4 decoder chunks."
+        ),
+    )
+    parser.add_argument(
+        "--group-size",
+        type=int,
+        default=16,
+        help="per_grouped_channel group size for --quant palettize4",
+    )
     parser.add_argument(
         "--target",
         choices=["all", "embedding", "norm-lm-head"],
@@ -172,14 +192,26 @@ def main() -> None:
         flush=True,
     )
 
-    quant_config = cto.OptimizationConfig(
-        global_config=cto.OpLinearQuantizerConfig(
-            mode="linear_symmetric",
-            dtype="int4",
-            granularity="per_block",
-            block_size=args.block_size,
+    if args.quant == "int4-block":
+        quant_config = cto.OptimizationConfig(
+            global_config=cto.OpLinearQuantizerConfig(
+                mode="linear_symmetric",
+                dtype="int4",
+                granularity="per_block",
+                block_size=args.block_size,
+            )
         )
-    )
+        quant_suffix = f"int4_block{args.block_size}"
+    else:  # palettize4
+        quant_config = cto.OptimizationConfig(
+            global_config=cto.OpPalettizerConfig(
+                mode="kmeans",
+                nbits=4,
+                granularity="per_grouped_channel",
+                group_size=args.group_size,
+            )
+        )
+        quant_suffix = f"pal4_g{args.group_size}"
 
     if args.target in {"all", "embedding"}:
         example_input_ids = torch.zeros(
@@ -197,7 +229,8 @@ def main() -> None:
             output_name="hidden",
             out_dir=out_dir,
             quant_config=quant_config,
-            block_size=args.block_size,
+            quant_suffix=quant_suffix,
+            quant_kind=args.quant,
             keep_fp16=args.keep_fp16,
             force=args.force,
         )
@@ -218,7 +251,8 @@ def main() -> None:
             output_name="logits",
             out_dir=out_dir,
             quant_config=quant_config,
-            block_size=args.block_size,
+            quant_suffix=quant_suffix,
+            quant_kind=args.quant,
             keep_fp16=args.keep_fp16,
             force=args.force,
         )

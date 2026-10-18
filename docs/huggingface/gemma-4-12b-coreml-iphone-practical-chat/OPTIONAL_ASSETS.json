@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "release": "speculative-fused6",
+  "assets": [
+    {
+      "path": "models/speculative/drafter/gemma4_12b_drafter_step_kv512_mixed_pal4_g16_head_int8.mlpackage",
+      "role": "Gemma 4 MTP one-step drafter",
+      "source_model": "google/gemma-4-12B-it-assistant",
+      "quantization": "pal4 group16 body, int8 per-channel lm_head",
+      "selected": true
+    },
+    {
+      "path_glob": "models/speculative/verify/gemma4_12b_layer??_verify_seq4_kv512_pal4_g16.mlpackage",
+      "role": "48 target-greedy speculative verifier layers",
+      "source_model": "google/gemma-4-12B-it-qat-q4_0-unquantized",
+      "quantization": "pal4 group16",
+      "selected": true
+    },
+    {
+      "path": "models/fused/kv/gemma4_12b_layers00_05_prefill_seq320_kv_pal4_g16.mlpackage",
+      "role": "selected six-layer fused prefill",
+      "source_model": "google/gemma-4-12B-it-qat-q4_0-unquantized",
+      "quantization": "pal4 group16",
+      "selected": true
+    },
+    {
+      "path": "models/fused/kv/gemma4_12b_layers00_05_verify_seq4_kv512_pal4_g16.mlpackage",
+      "role": "selected six-layer fused verifier",
+      "source_model": "google/gemma-4-12B-it-qat-q4_0-unquantized",
+      "quantization": "pal4 group16",
+      "selected": true
+    }
+  ],
+  "excluded": [
+    {
+      "pattern": "layers06_11",
+      "reason": "5.4% slower than the selected six-layer iPhone 17 run"
+    },
+    {
+      "pattern": "backup-reversed-input-order",
+      "reason": "incorrect MTP concatenation order and invalid acceptance behavior"
+    },
+    {
+      "pattern": "*.mlmodelc",
+      "reason": "compiled output is toolchain and deployment specific"
+    }
+  ]
+}

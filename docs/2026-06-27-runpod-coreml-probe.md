@@ -90,10 +90,10 @@ runtime temporary buffers.
 
 ## Local Mac Core ML checks
 
-Copied selected int4 packages to:
+Copied selected int4 packages under the repository root:
 
-- `/Users/tasuku/Documents/llm小型化/runpod-artifacts/coreml-probes/`
-- `/Users/tasuku/Documents/llm小型化/runpod-artifacts/compiled/`
+- `runpod-artifacts/coreml-probes/`
+- `runpod-artifacts/compiled/`
 
 `runpod-artifacts/` is ignored by git.
 

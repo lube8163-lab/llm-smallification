@@ -12,6 +12,8 @@ from pathlib import Path
 DEFAULT_MODEL_DIR = Path("ios/CoreMLProbe/CoreMLProbe/Models")
 NORM_LM_HEAD = "gemma4_12b_norm_lm_head_1tok_int4_block32.mlmodelc"
 LEGACY_LM_HEAD = "gemma4_12b_lm_head_1tok_int4_block32.mlmodelc"
+IMAGE_EMBEDDER = "gemma4_12b_image_embedder_patches32_int4_block32.mlmodelc"
+AUDIO_EMBEDDER = "gemma4_12b_audio_embedder_tokens32_int4_block32.mlmodelc"
 
 
 def embedding_name(seq_len: int) -> str:
@@ -76,7 +78,13 @@ def verify_required_bundle(model_dir: Path, name: str, reporter: Reporter) -> bo
     return True
 
 
-def verify_decoders(model_dir: Path, expected_layers: int, seq_len: int, reporter: Reporter) -> None:
+def verify_decoders(
+    model_dir: Path,
+    expected_layers: int,
+    seq_len: int,
+    max_decoder_layers_per_bundle: int | None,
+    reporter: Reporter,
+) -> None:
     by_index: dict[int, list[str]] = {}
     ignored: list[str] = []
     layer_pattern = decoder_re(seq_len)
@@ -99,6 +107,15 @@ def verify_decoders(model_dir: Path, expected_layers: int, seq_len: int, reporte
         if end < start:
             reporter.error(f"invalid decoder chunk range: {path.name}")
             continue
+        layer_count = end - start + 1
+        if (
+            max_decoder_layers_per_bundle is not None
+            and layer_count > max_decoder_layers_per_bundle
+        ):
+            reporter.error(
+                f"{path.name} contains {layer_count} decoder layers; "
+                f"maximum supported is {max_decoder_layers_per_bundle}"
+            )
         for index in range(start, end + 1):
             by_index.setdefault(index, []).append(path.name)
 
@@ -176,12 +193,66 @@ def verify_lm_head(
         reporter.error(f"missing {NORM_LM_HEAD} or {LEGACY_LM_HEAD}")
 
 
+def verify_image_embedder(model_dir: Path, reporter: Reporter) -> None:
+    image_path = model_dir / IMAGE_EMBEDDER
+    if not image_path.is_dir():
+        reporter.error(f"missing {IMAGE_EMBEDDER}")
+        return
+
+    reporter.ok(f"{IMAGE_EMBEDDER} present ({gib(package_size(image_path))})")
+    mil = read_mil(image_path, reporter)
+    if not mil:
+        return
+
+    required_markers = {
+        "pixel_values input": "pixel_values",
+        "image_position_ids input": "image_position_ids",
+        "image_hidden output": "image_hidden",
+        "32-patch shape": "[1, 32",
+        "patch vector width": "6912",
+        "decoder hidden width": "3840",
+    }
+    for label, marker in required_markers.items():
+        if marker in mil:
+            reporter.ok(f"image embedder MIL includes {label}")
+        else:
+            reporter.error(f"image embedder MIL is missing {label}")
+
+
+def verify_audio_embedder(model_dir: Path, reporter: Reporter) -> None:
+    audio_path = model_dir / AUDIO_EMBEDDER
+    if not audio_path.is_dir():
+        reporter.error(f"missing {AUDIO_EMBEDDER}")
+        return
+
+    reporter.ok(f"{AUDIO_EMBEDDER} present ({gib(package_size(audio_path))})")
+    mil = read_mil(audio_path, reporter)
+    if not mil:
+        return
+
+    required_markers = {
+        "input_features input": "input_features",
+        "audio_hidden output": "audio_hidden",
+        "32-token shape": "[1, 32",
+        "audio feature width": "640",
+        "decoder hidden width": "3840",
+    }
+    for label, marker in required_markers.items():
+        if marker in mil:
+            reporter.ok(f"audio embedder MIL includes {label}")
+        else:
+            reporter.error(f"audio embedder MIL is missing {label}")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("model_dir", nargs="?", default=DEFAULT_MODEL_DIR)
     parser.add_argument("--expected-layers", type=int, default=48)
     parser.add_argument("--seq-len", type=int, default=4)
+    parser.add_argument("--max-decoder-layers-per-bundle", type=int)
     parser.add_argument("--require-norm-lm-head", action="store_true")
+    parser.add_argument("--require-image-embedder", action="store_true")
+    parser.add_argument("--require-audio-embedder", action="store_true")
     parser.add_argument("--allow-legacy-lm-head", action="store_true")
     parser.add_argument("--fail-on-legacy", action="store_true")
     args = parser.parse_args()
@@ -193,7 +264,13 @@ def main() -> int:
         reporter.error(f"missing model directory: {model_dir}")
     else:
         verify_required_bundle(model_dir, embedding_name(args.seq_len), reporter)
-        verify_decoders(model_dir, args.expected_layers, args.seq_len, reporter)
+        verify_decoders(
+            model_dir,
+            args.expected_layers,
+            args.seq_len,
+            args.max_decoder_layers_per_bundle,
+            reporter,
+        )
         verify_lm_head(
             model_dir,
             require_norm_lm_head=args.require_norm_lm_head,
@@ -201,6 +278,10 @@ def main() -> int:
             fail_on_legacy=args.fail_on_legacy,
             reporter=reporter,
         )
+        if args.require_image_embedder:
+            verify_image_embedder(model_dir, reporter)
+        if args.require_audio_embedder:
+            verify_audio_embedder(model_dir, reporter)
 
     print(
         f"summary: {len(reporter.errors)} error(s), {len(reporter.warnings)} warning(s)"

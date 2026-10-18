@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">Gemma 4 12B Core ML multimodal smoke path on iPhone</title>
+  <desc id="desc">Diagram showing text, image, and audio frontends feeding a shared 48-layer Core ML decoder stack and norm/lm_head endpoint on iPhone.</desc>
+  <defs>
+    <style>
+      .bg { fill: #f7f7f2; }
+      .panel { fill: #ffffff; stroke: #242424; stroke-width: 2; rx: 12; }
+      .soft { fill: #e9f3ef; stroke: #2f6f5e; stroke-width: 2; rx: 12; }
+      .warn { fill: #fff1d8; stroke: #9a6a18; stroke-width: 2; rx: 12; }
+      .accent { fill: #e8eefb; stroke: #385a9e; stroke-width: 2; rx: 12; }
+      .head { font: 700 30px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #171717; }
+      .label { font: 700 20px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #171717; }
+      .body { font: 16px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #303030; }
+      .tiny { font: 14px -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; fill: #4b4b4b; }
+      .mono { font: 15px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; fill: #252525; }
+      .arrow { stroke: #242424; stroke-width: 3; fill: none; marker-end: url(#arrow); }
+      .muted { stroke: #777; stroke-width: 2; stroke-dasharray: 7 7; fill: none; marker-end: url(#arrow-muted); }
+    </style>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#242424"/>
+    </marker>
+    <marker id="arrow-muted" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#777"/>
+    </marker>
+  </defs>
+
+  <rect class="bg" width="1280" height="720"/>
+  <text class="head" x="48" y="58">Gemma 4 12B Unified on iPhone: multimodal smoke path</text>
+  <text class="body" x="50" y="92">Goal: prove real image/audio Core ML frontends can feed the same low-memory 48-layer decoder path.</text>
+
+  <rect class="soft" x="48" y="140" width="280" height="112" rx="12"/>
+  <text class="label" x="72" y="178">Text path</text>
+  <text class="mono" x="72" y="207">input_ids [1,64]</text>
+  <text class="tiny" x="72" y="231">Gemma tokenizer + text embedding</text>
+
+  <rect class="accent" x="48" y="302" width="280" height="130" rx="12"/>
+  <text class="label" x="72" y="340">Image smoke</text>
+  <text class="mono" x="72" y="369">pixel_values [1,32,6912]</text>
+  <text class="mono" x="72" y="394">position_ids [1,32,2]</text>
+  <text class="tiny" x="72" y="418">real Gemma4 embed_vision endpoint</text>
+
+  <rect class="warn" x="48" y="482" width="280" height="112" rx="12"/>
+  <text class="label" x="72" y="520">Audio smoke</text>
+  <text class="mono" x="72" y="549">input_features [1,32,640]</text>
+  <text class="tiny" x="72" y="573">real Gemma4 embed_audio endpoint</text>
+
+  <rect class="panel" x="420" y="252" width="246" height="170" rx="12"/>
+  <text class="label" x="448" y="294">Shared seam</text>
+  <text class="mono" x="448" y="326">hidden [1,64,3840]</text>
+  <text class="tiny" x="448" y="354">image/audio hidden inserted</text>
+  <text class="tiny" x="448" y="376">at positions 32...63</text>
+
+  <rect class="panel" x="754" y="188" width="310" height="240" rx="12"/>
+  <text class="label" x="790" y="230">Core ML decoder</text>
+  <text class="mono" x="790" y="262">Seq64, no KV cache</text>
+  <text class="mono" x="790" y="292">48 layers</text>
+  <text class="mono" x="790" y="322">12 x 4-layer bundles</text>
+  <text class="tiny" x="790" y="356">endpoint CPU / decoder All</text>
+  <text class="tiny" x="790" y="382">load / predict / release</text>
+
+  <rect class="soft" x="1094" y="252" width="138" height="170" rx="12"/>
+  <text class="label" x="1118" y="294">Head</text>
+  <text class="mono" x="1118" y="326">norm</text>
+  <text class="mono" x="1118" y="352">lm_head</text>
+  <text class="tiny" x="1118" y="382">1 token</text>
+
+  <path class="arrow" d="M328 196 C368 196 378 276 420 310"/>
+  <path class="arrow" d="M328 367 C370 367 378 345 420 340"/>
+  <path class="arrow" d="M328 538 C370 538 378 403 420 370"/>
+  <path class="arrow" d="M666 337 L754 337"/>
+  <path class="arrow" d="M1064 337 L1094 337"/>
+
+  <rect class="panel" x="420" y="500" width="812" height="104" rx="12"/>
+  <text class="label" x="448" y="536">Measured on iPhone</text>
+  <text class="body" x="448" y="566">Image smoke: peak 581.8 MB, token #258883, analyzer 0 errors</text>
+  <text class="body" x="848" y="566">Audio smoke: peak 581.9 MB, token #236770, analyzer 0 errors</text>
+  <text class="tiny" x="448" y="590">Text regression after both: 8 tokens matched baseline, warm avg 13.29 sec/token, peak 587.7 MB</text>
+
+  <path class="muted" d="M188 638 C344 670 808 674 1136 638"/>
+  <text class="tiny" x="376" y="672">This proves the runtime/model path, not full semantic image/audio understanding.</text>
+</svg>

@@ -1,0 +1,35 @@
+name: Repository source safety
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  source-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Reject credential and model artifact paths
+        shell: python
+        run: |
+          import subprocess
+          from pathlib import PurePosixPath
+          files = subprocess.check_output(['git', 'ls-files', '-z']).decode().split('\0')
+          forbidden = []
+          for value in filter(None, files):
+              p = PurePosixPath(value)
+              if p.name.startswith(('.env', '.dev.vars')) or p.suffix in ('.pem', '.key', '.p12', '.pfx', '.gguf', '.safetensors', '.pth') or any(part.endswith(('.mlpackage', '.mlmodelc', '.aimodel', '.aimodelc')) for part in p.parts):
+                  forbidden.append(value)
+          if forbidden:
+              raise SystemExit('Credential or model artifact paths rejected: ' + ', '.join(forbidden))
+      - name: Verify and run Gitleaks
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz -o /tmp/gitleaks.tar.gz
+          echo '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks git . --gitleaks-ignore-path . --log-opts='--all --full-history' --ignore-gitleaks-allow --redact=100 --no-banner

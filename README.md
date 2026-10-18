@@ -8,6 +8,10 @@ SwiftUI実機プローブ、計測・品質評価ツール、実験記録を公�
 [Hugging Face](https://huggingface.co/lube8163/gemma-4-12b-coreml-iphone-practical-chat)
 で公開しています。
 
+このリポジトリは **Gemma 4 / Core ML** の実験を扱います。Qwen 3.6 / 3.8の
+Core AI streaming実験は、共通ランタイムを持つ別のprivateリポジトリで管理します。
+[ブランチ整理と保存範囲](docs/repository-status.md)に、今回統合した作業と確認の限界を記録しています。
+
 ## 現在の到達点
 
 - 48層のpal4 decoder、Seq320 prefill、KV cache 512による長文生成
